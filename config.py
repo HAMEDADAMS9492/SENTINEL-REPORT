@@ -276,6 +276,7 @@ class EventType(str, Enum):
     LOITERING = "presence_prolongee"
     ABANDONED_OBJECT = "objet_abandonne"
     AFTER_HOURS = "presence_hors_horaires"
+    OVERCROWDING = "surdensite"
 
 
 class Severity(str, Enum):
@@ -377,6 +378,7 @@ _ZONE_EVENT_TYPES: Final[dict[ZoneType, tuple["EventType", ...]]] = {
         EventType.LOITERING,
         EventType.ABANDONED_OBJECT,
         EventType.AFTER_HOURS,
+        EventType.OVERCROWDING,
     ),
     # Présence normale aux heures d'ouverture. Pas d'intrusion, donc, mais tout
     # le reste : la nuit, un stationnement prolongé ou un objet déposé comptent.
@@ -384,13 +386,22 @@ _ZONE_EVENT_TYPES: Final[dict[ZoneType, tuple["EventType", ...]]] = {
         EventType.LOITERING,
         EventType.ABANDONED_OBJECT,
         EventType.AFTER_HOURS,
+        EventType.OVERCROWDING,
     ),
     # On y passe, on n'y reste pas. Traverser ne déclenche rien — c'est la
     # définition même d'un lieu de transit — mais s'y arrêter, si.
-    ZoneType.TRANSIT: (EventType.LOITERING, EventType.ABANDONED_OBJECT),
+    ZoneType.TRANSIT: (
+        EventType.LOITERING,
+        EventType.ABANDONED_OBJECT,
+        EventType.OVERCROWDING,
+    ),
     # Lieu où un objet déposé est le vrai risque : quai, salle d'attente, hall
     # de gare. La présence de personnes y est normale et prolongée.
-    ZoneType.SENSITIVE: (EventType.ABANDONED_OBJECT, EventType.AFTER_HOURS),
+    ZoneType.SENSITIVE: (
+        EventType.ABANDONED_OBJECT,
+        EventType.AFTER_HOURS,
+        EventType.OVERCROWDING,
+    ),
     # Mesure de flux uniquement. Ne lever aucun incident est une décision, pas
     # un oubli : compter les entrées d'un magasin ne doit pas produire un
     # rapport par client.
@@ -441,6 +452,10 @@ class SurveillanceZone:
         cooldown_s: Délai de garde propre à la zone. `None` = valeur globale.
         max_movement_ratio: Seuil d'immobilité propre à la zone, en fraction de
             la hauteur apparente de l'objet. `None` = valeur globale.
+        min_occupancy: Nombre d'occupants à partir duquel la zone est réputée
+            surchargée. `None` = valeur globale. C'est la surcharge la plus utile
+            en pratique : six personnes dans un hall de gare est normal, six
+            personnes dans un local technique ne l'est pas.
         crossing_line: Nom de la ligne de comptage associée, pour une zone de
             type `COUNTING`. `None` = pas de ligne.
     """
@@ -453,6 +468,7 @@ class SurveillanceZone:
     min_duration_s: float | None = None
     cooldown_s: float | None = None
     max_movement_ratio: float | None = None
+    min_occupancy: int | None = None
     crossing_line: str | None = None
 
     @property
@@ -500,6 +516,7 @@ class SurveillanceZone:
                 ("min_duration_s", self.min_duration_s),
                 ("cooldown_s", self.cooldown_s),
                 ("max_movement_ratio", self.max_movement_ratio),
+                ("min_occupancy", self.min_occupancy),
             )
             if valeur is not None
         }
@@ -624,6 +641,10 @@ class EventRule:
         owner_radius_ratio: Même rayon, en multiple de la hauteur de l'objet
             surveillé. Même argument de perspective : un rayon fixe de 150 px
             couvre un mètre au premier plan et huit mètres au fond.
+        min_occupancy: Nombre d'occupants d'une même classe à partir duquel la
+            zone est réputée surchargée. `None` = critère non appliqué. C'est le
+            seul champ de règle qui porte sur un **ensemble** d'objets et non sur
+            un objet isolé.
     """
 
     event_type: EventType
@@ -636,6 +657,7 @@ class EventRule:
     requires_no_owner: bool = False
     owner_radius_px: float = 150.0
     owner_radius_ratio: float | None = None
+    min_occupancy: int | None = None
 
 
 def scaled_rules(
@@ -725,6 +747,24 @@ EVENT_RULES: Final[tuple[EventRule, ...]] = (
         cooldown_s=120.0,
         severity=Severity.MEDIUM,
     ),
+    EventRule(
+        # Attroupement. La première règle du projet qui raisonne sur un
+        # ENSEMBLE : elle compte les occupants d'une zone avant de désigner
+        # quelqu'un. Elle n'était pas exprimable tant qu'un prédicat ne voyait
+        # qu'un objet à la fois.
+        #
+        # Le seuil de six personnes n'a rien d'universel — c'est un point de
+        # départ à régler par site, ou à surcharger zone par zone
+        # (`SurveillanceZone.min_occupancy`). La durée de 10 s écarte les
+        # croisements : sept personnes qui se croisent devant une porte ne sont
+        # pas un attroupement.
+        event_type=EventType.OVERCROWDING,
+        classes=("person",),
+        min_duration_s=10.0,
+        cooldown_s=180.0,
+        severity=Severity.MEDIUM,
+        min_occupancy=6,
+    ),
 )
 
 
@@ -809,6 +849,7 @@ class ScoringConfig:
         (EventType.ABANDONED_OBJECT, 35.0),
         (EventType.INTRUSION, 30.0),
         (EventType.LOITERING, 20.0),
+        (EventType.OVERCROWDING, 18.0),
         (EventType.AFTER_HOURS, 15.0),
     )
     points_per_minute_present: float = 10.0
@@ -856,6 +897,26 @@ class ScoringConfig:
 
 
 SCORING: Final[ScoringConfig] = ScoringConfig()
+
+
+@dataclass(frozen=True)
+class OccupancyConfig:
+    """Comptage des occupants par zone (`occupancy.py`).
+
+    Attributes:
+        min_change: Variation minimale pour être signalée. Une personne de plus
+            ou de moins dans une foule n'apprend rien et noierait la chronologie
+            sous des lignes sans information.
+        notable_from: Nombre d'occupants à partir duquel une variation devient un
+            fait marquant du rapport. Une zone qui passe de 0 à 1 personne n'en
+            est pas un ; une zone qui passe de 2 à 7, si.
+    """
+
+    min_change: int = 1
+    notable_from: int = 3
+
+
+OCCUPANCY: Final[OccupancyConfig] = OccupancyConfig()
 
 @dataclass(frozen=True)
 class TimelineConfig:

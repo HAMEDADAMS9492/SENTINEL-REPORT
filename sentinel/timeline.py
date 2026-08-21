@@ -69,8 +69,9 @@ class TimelineFact:
     """Un fait marquant, situé dans une tranche.
 
     Attributes:
-        kind: Nature du fait — `"entree"`, `"sortie"`, `"incident"` ou
-            `"priorite"`. Sert au tri et à l'affichage, jamais à une décision.
+        kind: Nature du fait — `"entree"`, `"sortie"`, `"incident"`,
+            `"priorite"` ou `"occupation"`. Sert au tri et à l'affichage, jamais
+            à une décision.
         label: Description lisible, telle qu'elle apparaîtra dans le rapport.
         video_time: Instant précis du fait, en temps vidéo.
     """
@@ -82,7 +83,7 @@ class TimelineFact:
     # Ordre de présentation dans une tranche : les incidents d'abord, le
     # mouvement ensuite. Un lecteur cherche les incidents, pas les allées et
     # venues.
-    ORDER = {"incident": 0, "priorite": 1, "entree": 2, "sortie": 3}
+    ORDER = {"incident": 0, "priorite": 1, "occupation": 2, "entree": 3, "sortie": 4}
 
     @property
     def rank(self) -> int:
@@ -159,6 +160,7 @@ class Timeline:
         present: Sequence[TrackedObject],
         events: Iterable[Event] = (),
         wall_time: datetime | None = None,
+        occupancy_changes: Iterable[object] = (),
     ) -> None:
         """Enregistre l'état d'une frame et en déduit les transitions.
 
@@ -171,6 +173,10 @@ class Timeline:
                 fausse sortie suivie d'une fausse entrée.
             events: Incidents levés sur cette frame.
             wall_time: Horodatage réel, mémorisé pour dater le rapport.
+            occupancy_changes: Variations d'occupation constatées sur cette
+                frame (`ZoneOccupancy.update()`). « Hall : 2 → 7 personnes » est
+                un fait marquant qu'aucune règle par objet ne saurait formuler :
+                il décrit la scène, pas un individu.
         """
         self._last_video_time = max(self._last_video_time, video_time)
         if wall_time is not None:
@@ -189,6 +195,11 @@ class Timeline:
                 self._notable.discard(track_id)
 
         self._present = courant
+
+        for variation in occupancy_changes:
+            libelle = getattr(variation, "label", None)
+            if libelle:
+                self._record(video_time, "occupation", libelle)
 
         for event in events:
             self._record(

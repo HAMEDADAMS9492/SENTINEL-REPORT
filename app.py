@@ -990,9 +990,14 @@ def process_video(source: VideoSource, settings: dict[str, object], pipeline) ->
                         zone_manager.zones_for(obj.detection), tracker.video_time
                     )
 
+                # `evaluate()` recompte l'occupation avant d'appliquer les
+                # règles : les variations sont donc déjà à jour ici.
+                variations = event_engine.occupancy.changes(notable_only=True)
+                avant = len(variations)
                 events = event_engine.evaluate(
                     objects, tracker, image, tracker.video_time, frame.wall_time
                 )
+                nouvelles = event_engine.occupancy.changes(notable_only=True)[avant:]
                 if events:
                     st.session_state["events"].extend(events)
 
@@ -1002,7 +1007,11 @@ def process_video(source: VideoSource, settings: dict[str, object], pipeline) ->
                 # produirait une fausse sortie puis une fausse entrée à chaque
                 # fois qu'un objet passe derrière un poteau.
                 timeline.observe(
-                    tracker.video_time, tracker.active(), events, frame.wall_time
+                    tracker.video_time,
+                    tracker.active(),
+                    events,
+                    frame.wall_time,
+                    occupancy_changes=nouvelles,
                 )
 
                 image_slot.image(

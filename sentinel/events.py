@@ -54,6 +54,7 @@ import numpy as np
 
 import config
 from sentinel.detection import Detection
+from sentinel.occupancy import ZoneOccupancy
 from sentinel.tracker import TrackedObject, Tracker
 
 logger = logging.getLogger(__name__)
@@ -203,6 +204,9 @@ class FrameContext:
         video_time: Temps métier de la frame — celui qui pilote les décisions.
         wall_time: Horodatage réel — pour dater et pour la règle hors horaires.
         frame: Image courante, pour la capture de preuve. `None` en test.
+        occupancy: Compteur d'occupants par zone. `None` quand aucune règle
+            collective n'est active — les règles qui s'en servent doivent donc
+            tester sa présence avant de l'interroger.
     """
 
     objects: tuple[TrackedObject, ...]
@@ -211,6 +215,7 @@ class FrameContext:
     video_time: float
     wall_time: datetime
     frame: "np.ndarray | None" = None
+    occupancy: ZoneOccupancy | None = None
 
     def candidates(self, rule: config.EventRule) -> tuple[TrackedObject, ...]:
         """Objets qu'une règle peut effectivement mettre en cause.
@@ -382,6 +387,7 @@ class EventEngine:
         rules: Sequence[config.EventRule] | None = None,
         schedule: config.ScheduleConfig | None = None,
         scoring: config.ScoringConfig | None = None,
+        occupancy: ZoneOccupancy | None = None,
     ) -> None:
         """Initialise le moteur.
 
@@ -390,6 +396,7 @@ class EventEngine:
             rules: Règles à appliquer. `None` = `config.EVENT_RULES`.
             schedule: Horaires d'ouverture. `None` = `config.SCHEDULE`.
             scoring: Barème de priorité. `None` = `config.SCORING`.
+            occupancy: Compteur d'occupation. `None` = un compteur neuf.
         """
         self._zones = zone_manager
         self._rules: tuple[config.EventRule, ...] = tuple(
@@ -397,6 +404,10 @@ class EventEngine:
         )
         self._schedule = config.SCHEDULE if schedule is None else schedule
         self._scoring = config.SCORING if scoring is None else scoring
+        # Collaborateur, pas responsabilité : le moteur *utilise* un compteur,
+        # il n'en implémente pas la logique. `ZoneOccupancy` reste testable seul,
+        # sans polygone ni règle.
+        self.occupancy = ZoneOccupancy() if occupancy is None else occupancy
         self._history: list[Event] = []
         self._sequence: dict[str, int] = {}
 
@@ -434,6 +445,9 @@ class EventEngine:
             Les événements déclenchés sur cette frame (souvent vide).
         """
         moment = wall_time or datetime.now()
+        # Le comptage précède l'évaluation : une règle collective a besoin de
+        # l'état de la frame courante, pas de celui de la précédente.
+        self.occupancy.update(tracked_objects, video_time)
         context = FrameContext(
             objects=tuple(tracked_objects),
             tracker=tracker,
@@ -441,6 +455,7 @@ class EventEngine:
             video_time=video_time,
             wall_time=moment,
             frame=frame,
+            occupancy=self.occupancy,
         )
 
         rang_objet = {obj.track_id: rang for rang, obj in enumerate(context.objects)}
@@ -601,6 +616,55 @@ class EventEngine:
                 obj.age,
                 {"heure_locale": context.wall_time.strftime("%H:%M")},
             )
+
+    def _overcrowding_outcomes(
+        self, rule: config.EventRule, context: FrameContext
+    ) -> Iterator[RuleOutcome]:
+        """Constats de surdensité : trop de monde au même endroit, assez longtemps.
+
+        La première règle du projet qui **compte avant de désigner**. Elle
+        n'était pas exprimable tant qu'un prédicat ne voyait qu'un objet à la
+        fois : le nombre d'occupants d'une zone n'est pas une propriété d'un
+        objet, c'est une propriété de la scène.
+
+        Noter la dissymétrie assumée : le comptage porte sur **tous** les objets
+        présents (`occupancy`), la mise en cause sur les seuls
+        `context.candidates(rule)`. Sept personnes forment un attroupement même
+        si six d'entre elles viennent d'être signalées et sont sous délai de
+        garde ; c'est le fait collectif qui est constaté, l'objet désigné n'en
+        est que le porteur pour le rapport.
+        """
+        occupation = context.occupancy
+        if occupation is None or rule.min_occupancy is None:
+            return
+
+        for zone_name in context.zones_handling(rule.event_type):
+            locale = context.rule_for(zone_name, rule)
+            seuil = locale.min_occupancy
+            if seuil is None:
+                continue
+
+            for class_name in locale.classes or ("person",):
+                if occupation.count(zone_name, class_name) < seuil:
+                    continue
+                duree = occupation.duration_at_least(
+                    zone_name, class_name, seuil, context.video_time
+                )
+                if duree < locale.min_duration_s:
+                    continue
+
+                for obj in context.candidates(rule):
+                    if zone_name not in obj.zones or obj.class_name != class_name:
+                        continue
+                    yield RuleOutcome(
+                        obj,
+                        zone_name,
+                        duree,
+                        {
+                            "occupants": occupation.count(zone_name, class_name),
+                            "seuil_occupation": seuil,
+                        },
+                    )
 
     @staticmethod
     def _reported_zone(
@@ -997,6 +1061,7 @@ class EventEngine:
         config.EventType.LOITERING: _dwell_outcomes,
         config.EventType.ABANDONED_OBJECT: _abandoned_outcomes,
         config.EventType.AFTER_HOURS: _after_hours_outcomes,
+        config.EventType.OVERCROWDING: _overcrowding_outcomes,
     }
 
     # -- Consultation ----------------------------------------------------------

@@ -450,6 +450,42 @@ S'y ajoutent deux garde-fous contre les fausses alertes, exploités par
 n'atteint jamais les règles) et `last_event_time` par type d'événement, qui
 implémente le délai de garde décrit ci-dessous.
 
+### 3.4 bis Occupation des zones et surdensité (`occupancy.py`)
+
+« Sept personnes dans le hall depuis douze secondes » n'est la propriété d'aucun
+objet : c'est une propriété de la **scène**. Aucun prédicat mono-objet ne pouvait
+l'exprimer — c'est précisément ce que l'ouverture du moteur aux règles
+multi-objets a débloqué.
+
+**Pourquoi une classe distincte de `ZoneManager`.** Le gestionnaire de zones est
+sans mémoire : ses réponses ne dépendent que de la frame courante, ce qui le rend
+simple à raisonner et à tester. L'occupation est de nature opposée — une durée ne
+se constate que dans le temps. Les séparer garde la géométrie géométrique, et rend
+cette mémoire testable sans polygone, sans image et sans OpenCV.
+
+**Compter des identités, pas des détections.** Le comptage s'appuie sur
+`track_id`. Compter des boîtes donnerait un nombre qui bat au rythme du
+détecteur : une personne perdue puis retrouvée compterait deux fois, un objet
+momentanément occulté ferait chuter le total. C'est la même raison qui rend le
+tracker indispensable au chronométrage (§ 3.4).
+
+**Le chronomètre de seuil.** Pour chaque couple *(zone, classe, seuil)*, on
+mémorise l'**instant** du franchissement plutôt qu'un compteur de frames. La
+durée reste ainsi indépendante de la cadence d'analyse, et passer de 5 à 8
+personnes ne remet pas à zéro le chronomètre du seuil 5.
+
+**La dissymétrie de la règle collective.** Le comptage porte sur *tous* les
+objets présents ; la mise en cause sur les seuls objets éligibles. Sept personnes
+forment un attroupement même si six d'entre elles viennent d'être signalées et
+sont sous délai de garde : c'est le fait collectif qui est constaté, l'objet
+désigné n'en est que le porteur pour le rapport — un rapport nomme un objet,
+sinon il n'est ni vérifiable ni illustrable par une preuve.
+
+Un seul mécanisme sert deux usages : la règle **surdensité** (« plus de N
+personnes en zone X pendant T secondes », seuil surchargeable par
+`SurveillanceZone.min_occupancy`) et les transitions de la chronologie
+(« hall : 2 → 7 personnes »).
+
 ### 3.5 Seuils relatifs — corriger la perspective sans calibration
 
 Un seuil exprimé en pixels n'a pas le même sens partout dans l'image. Un
@@ -797,10 +833,10 @@ produire un rapport par client.
 
 | Type | Ce qu'il attend | Règles levées |
 |---|---|---|
-| `FORBIDDEN` | Toute présence y est une infraction | les quatre |
-| `SCHEDULED` | Présence normale aux heures d'ouverture | rôdage, objet abandonné, hors horaires |
-| `TRANSIT` | On y passe, on n'y reste pas | rôdage, objet abandonné |
-| `SENSITIVE` | Le risque est l'objet déposé | objet abandonné, hors horaires |
+| `FORBIDDEN` | Toute présence y est une infraction | les cinq |
+| `SCHEDULED` | Présence normale aux heures d'ouverture | rôdage, objet abandonné, hors horaires, surdensité |
+| `TRANSIT` | On y passe, on n'y reste pas | rôdage, objet abandonné, surdensité |
+| `SENSITIVE` | Le risque est l'objet déposé | objet abandonné, hors horaires, surdensité |
 | `COUNTING` | Mesure de flux | aucune |
 
 **Les seuils se surchargent par zone.** `min_duration_s`, `cooldown_s` et
@@ -835,7 +871,7 @@ paragraphe de plus ici, et une source d'erreur de plus dans la configuration.
 | 2 | `detector.py` — YOLOv8 + sélecteur de modèle | ✅ fait |
 | 3 | `tracker.py` — ByteTrack + mémoire temporelle | ✅ fait |
 | 4 | `zones.py` — zones polygonales | ✅ fait |
-| 5 | `events.py` — les 4 règles d'incident + anti-rebond | ✅ fait |
+| 5 | `events.py` — les règles d'incident + anti-rebond | ✅ fait |
 | 6 | `report.py` — gabarits français + PDF + CSV | ✅ fait |
 | 7 | `app.py` — interface Streamlit | ✅ fait |
 | 8 | Bonus : règle OBJET ABANDONNÉ | ✅ fait |
