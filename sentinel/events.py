@@ -220,6 +220,11 @@ class FrameContext:
         plutôt que dans chaque prédicat évite de recalculer une condition dont on
         sait déjà que le résultat ne pourra pas être publié.
 
+        Le délai retenu est le **plus court** applicable, toutes zones
+        confondues. Retenir le délai global écarterait à tort un objet qu'une
+        zone plus permissive autoriserait à redéclencher ; le délai exact de la
+        zone est revérifié au moment de publier.
+
         Une règle collective lit `objects` pour compter et `candidates()` pour
         désigner : sept personnes peuvent constituer une surdensité alors que
         six d'entre elles sont sous délai de garde.
@@ -230,12 +235,91 @@ class FrameContext:
         Returns:
             Les objets éligibles, dans l'ordre de `objects`.
         """
+        plancher = self.shortest_cooldown(rule)
         return tuple(
             obj
             for obj in self.objects
             if (not rule.classes or obj.class_name in rule.classes)
-            and obj.can_raise(rule.event_type.value, self.video_time, rule.cooldown_s)
+            and obj.can_raise(rule.event_type.value, self.video_time, plancher)
         )
+
+    def zones_handling(self, event_type: config.EventType) -> tuple[str, ...]:
+        """Zones qui acceptent de lever ce type d'incident.
+
+        Args:
+            event_type: Type d'incident envisagé.
+
+        Returns:
+            Les noms des zones concernées.
+        """
+        methode = getattr(self.zones, "zones_handling", None)
+        if methode is None:
+            return ()
+        return tuple(methode(event_type))
+
+    def rule_for(self, zone_name: str | None, rule: config.EventRule) -> config.EventRule:
+        """Règle telle qu'elle s'applique dans une zone donnée.
+
+        Args:
+            zone_name: Zone concernée, ou `None` si le constat n'en dépend pas.
+            rule: Règle globale.
+
+        Returns:
+            La règle ajustée aux surcharges de la zone, ou la règle globale.
+        """
+        methode = getattr(self.zones, "rule_for", None)
+        if zone_name is None or methode is None:
+            return rule
+        return methode(zone_name, rule)
+
+    def shortest_cooldown(self, rule: config.EventRule) -> float:
+        """Plus court délai de garde applicable, toutes zones confondues.
+
+        Args:
+            rule: Règle globale.
+
+        Returns:
+            Le délai le plus court, en secondes.
+        """
+        methode = getattr(self.zones, "shortest_cooldown", None)
+        return rule.cooldown_s if methode is None else methode(rule)
+
+    def zones_for(self, obj: TrackedObject, event_type: config.EventType) -> tuple[str, ...]:
+        """Zones occupées par un objet **et** ouvertes à ce type d'incident.
+
+        Le tri alphabétique n'est pas cosmétique : sans lui, l'ordre d'itération
+        d'un `set` rendrait le choix de la zone non reproductible d'une exécution
+        à l'autre, et deux analyses de la même vidéo produiraient des rapports
+        différents.
+
+        Args:
+            obj: Objet suivi.
+            event_type: Type d'incident envisagé.
+
+        Returns:
+            Les zones concernées, par ordre alphabétique.
+        """
+        return tuple(sorted(obj.zones & set(self.zones_handling(event_type))))
+
+    def zone_allows(self, obj: TrackedObject, event_type: config.EventType) -> bool:
+        """Indique si le périmètre autorise ce type d'incident pour cet objet.
+
+        Un objet **hors de toute zone** est autorisé : l'absence de périmètre
+        n'est pas un refus, c'est une absence d'avis. Un objet qui n'occupe que
+        des zones de comptage, en revanche, est bloqué — c'est précisément ce
+        qu'une zone de type `COUNTING` signifie.
+
+        Args:
+            obj: Objet suivi.
+            event_type: Type d'incident envisagé.
+
+        Returns:
+            True si au moins une zone occupée l'autorise, ou si l'objet
+            n'occupe aucune zone.
+        """
+        if not obj.zones:
+            return True
+        return bool(self.zones_for(obj, event_type))
 
     def of_class(self, *class_names: str) -> tuple[TrackedObject, ...]:
         """Objets de la frame appartenant à l'une des classes citées.
@@ -378,10 +462,12 @@ class EventEngine:
         raised: list[Event] = []
         for _, _, rule, outcome in constats:
             obj = outcome.subject
-            # Second contrôle du délai de garde : `candidates()` l'a déjà
-            # appliqué en amont, mais une règle collective peut désigner un sujet
-            # qu'elle a tiré de `objects` plutôt que de `candidates()`. Le point
-            # de publication est le seul endroit où ce contrôle est sûr.
+            # Le délai de garde exact est celui de la zone où le constat a été
+            # fait, pas le délai global : c'est tout l'intérêt des surcharges par
+            # zone. Ce second contrôle est aussi le filet des règles collectives,
+            # qui peuvent désigner un sujet tiré de `objects` plutôt que de
+            # `candidates()`.
+            rule = context.rule_for(outcome.zone_name, rule)
             if not obj.can_raise(rule.event_type.value, video_time, rule.cooldown_s):
                 continue
 
@@ -454,118 +540,90 @@ class EventEngine:
     # accès aux autres objets et aux zones, ce qu'exigera toute règle
     # relationnelle.
 
-    def _intrusion_outcomes(
+    def _dwell_outcomes(
         self, rule: config.EventRule, context: FrameContext
     ) -> Iterator[RuleOutcome]:
-        """Constats d'intrusion : présence prolongée en zone restreinte."""
-        for obj in context.candidates(rule):
-            zone = self._check_intrusion(obj, rule, context.video_time)
-            if zone is not None:
-                yield RuleOutcome(obj, zone, obj.dwell_time(zone, context.video_time))
+        """Constats fondés sur une durée de séjour : intrusion et rôdage.
 
-    def _loitering_outcomes(
-        self, rule: config.EventRule, context: FrameContext
-    ) -> Iterator[RuleOutcome]:
-        """Constats de rôdage : présence anormalement longue, zone restreinte ou non."""
+        Le même mécanisme sert les deux règles — seul diffère l'ensemble des
+        zones qui les acceptent, et leur seuil. C'est précisément ce que le type
+        de zone exprime : une zone `TRANSIT` déclare le rôdage mais pas
+        l'intrusion, donc traverser n'y déclenche rien tandis que s'y arrêter,
+        si.
+
+        La zone retenue est la **première** (par ordre alphabétique) dont la
+        durée de séjour dépasse son propre seuil. Un objet à cheval sur deux
+        zones aux seuils différents est ainsi signalé dès que la plus stricte est
+        franchie.
+        """
         for obj in context.candidates(rule):
-            zone = self._check_loitering(obj, rule, context.video_time)
-            if zone is not None:
-                yield RuleOutcome(obj, zone, obj.dwell_time(zone, context.video_time))
+            for zone_name in context.zones_for(obj, rule.event_type):
+                locale = context.rule_for(zone_name, rule)
+                sejour = obj.dwell_time(zone_name, context.video_time)
+                if sejour >= locale.min_duration_s:
+                    yield RuleOutcome(obj, zone_name, sejour)
+                    break
 
     def _abandoned_outcomes(
         self, rule: config.EventRule, context: FrameContext
     ) -> Iterator[RuleOutcome]:
         """Constats d'objet abandonné : immobile, ancien, et sans propriétaire proche."""
         for obj in context.candidates(rule):
-            if not self._check_abandoned_object(obj, rule, context.tracker, context.video_time):
+            if not context.zone_allows(obj, rule.event_type):
+                continue
+            zone_name = self._reported_zone(obj, rule, context)
+            locale = context.rule_for(zone_name, rule)
+            if not self._check_abandoned_object(
+                obj, locale, context.tracker, context.video_time
+            ):
                 continue
             details: dict[str, object] = {
-                "deplacement_px": round(obj.displacement(rule.min_duration_s), 1),
-                "deplacement_relatif": round(obj.displacement_ratio(rule.min_duration_s), 3),
+                "deplacement_px": round(obj.displacement(locale.min_duration_s), 1),
+                "deplacement_relatif": round(obj.displacement_ratio(locale.min_duration_s), 3),
                 "proprietaire_presume": "aucun",
             }
-            yield RuleOutcome(obj, self._primary_zone(obj), obj.age, details)
+            yield RuleOutcome(obj, zone_name, obj.age, details)
 
     def _after_hours_outcomes(
         self, rule: config.EventRule, context: FrameContext
     ) -> Iterator[RuleOutcome]:
         """Constats hors horaires : c'est l'heure murale qui décide, pas le temps vidéo."""
         for obj in context.candidates(rule):
-            if not self._check_after_hours(obj, rule, context.wall_time):
+            if not context.zone_allows(obj, rule.event_type):
+                continue
+            zone_name = self._reported_zone(obj, rule, context)
+            locale = context.rule_for(zone_name, rule)
+            if not self._check_after_hours(obj, locale, context.wall_time):
                 continue
             yield RuleOutcome(
                 obj,
-                self._primary_zone(obj),
+                zone_name,
                 obj.age,
                 {"heure_locale": context.wall_time.strftime("%H:%M")},
             )
 
-    def _check_intrusion(
-        self, obj: TrackedObject, rule: config.EventRule, video_time: float
-    ) -> str | None:
-        """Teste la présence prolongée dans une zone restreinte.
-
-        Args:
-            obj: Objet suivi.
-            rule: Règle appliquée.
-            video_time: Temps vidéo courant.
-
-        Returns:
-            Le nom de la zone en infraction, ou `None`.
-        """
-        candidates = (
-            set(rule.zones) if rule.zones else set(self._zones.restricted_zone_names())
-        )
-        return self._first_zone_over_threshold(obj, candidates, rule.min_duration_s, video_time)
-
-    def _check_loitering(
-        self, obj: TrackedObject, rule: config.EventRule, video_time: float
-    ) -> str | None:
-        """Teste une présence anormalement longue, zone restreinte ou non.
-
-        Même mécanisme que `_check_intrusion` mais sans filtrer sur le drapeau
-        `restricted` et avec un seuil de durée bien supérieur : quelqu'un qui
-        traverse le hall est normal, quelqu'un qui y stationne 60 secondes ne
-        l'est pas forcément.
-
-        Args:
-            obj: Objet suivi.
-            rule: Règle appliquée.
-            video_time: Temps vidéo courant.
-
-        Returns:
-            Le nom de la zone concernée, ou `None`.
-        """
-        candidates = set(rule.zones) if rule.zones else set(obj.zones)
-        return self._first_zone_over_threshold(obj, candidates, rule.min_duration_s, video_time)
-
     @staticmethod
-    def _first_zone_over_threshold(
-        obj: TrackedObject,
-        candidates: set[str],
-        min_duration_s: float,
-        video_time: float,
+    def _reported_zone(
+        obj: TrackedObject, rule: config.EventRule, context: FrameContext
     ) -> str | None:
-        """Première zone occupée dont la durée de séjour dépasse le seuil.
+        """Zone à mentionner au rapport pour un constat qui ne dépend pas d'elle.
 
-        Le tri alphabétique n'est pas cosmétique : sans lui, l'ordre d'itération
-        d'un `set` rendrait le choix de la zone non reproductible d'une exécution
-        à l'autre, et deux analyses de la même vidéo produiraient des rapports
-        différents.
+        L'objet abandonné et la présence hors horaires se constatent sur l'objet
+        lui-même ; la zone ne conditionne pas le déclenchement, elle le situe.
+        On nomme donc en priorité une zone qui accepte ce type d'incident — c'est
+        elle qui porte les seuils applicables — et à défaut la zone
+        représentative de l'objet.
 
         Args:
             obj: Objet suivi.
-            candidates: Zones à considérer.
-            min_duration_s: Seuil de déclenchement.
-            video_time: Temps vidéo courant.
+            rule: Règle appliquée.
+            context: Scène de la frame.
 
         Returns:
-            Le nom de la zone, ou `None`.
+            Le nom de la zone, ou `None` si l'objet n'en occupe aucune.
         """
-        for zone_name in sorted(obj.zones & candidates):
-            if obj.dwell_time(zone_name, video_time) >= min_duration_s:
-                return zone_name
-        return None
+        declarantes = context.zones_for(obj, rule.event_type)
+        return declarantes[0] if declarantes else EventEngine._primary_zone(obj)
 
     def _check_abandoned_object(
         self, obj: TrackedObject, rule: config.EventRule, tracker: Tracker, video_time: float
@@ -935,8 +993,8 @@ class EventEngine:
     # type sans prédicat est détecté par une simple absence de clé — pas par une
     # branche `else` qu'on oublie de mettre à jour.
     _PREDICATES: dict[config.EventType, object] = {
-        config.EventType.INTRUSION: _intrusion_outcomes,
-        config.EventType.LOITERING: _loitering_outcomes,
+        config.EventType.INTRUSION: _dwell_outcomes,
+        config.EventType.LOITERING: _dwell_outcomes,
         config.EventType.ABANDONED_OBJECT: _abandoned_outcomes,
         config.EventType.AFTER_HOURS: _after_hours_outcomes,
     }

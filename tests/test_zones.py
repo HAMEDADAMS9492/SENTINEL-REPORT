@@ -29,9 +29,21 @@ def _zone(
     polygon: tuple[tuple[float, float], ...] = ((0.0, 0.0), (0.5, 0.0), (0.5, 1.0), (0.0, 1.0)),
     *,
     restricted: bool = True,
-) -> config.ZoneConfig:
-    """Zone rectangulaire couvrant par défaut la moitié gauche de l'image."""
-    return config.ZoneConfig(name=name, polygon=polygon, restricted=restricted)
+    **surcharges,
+) -> config.SurveillanceZone:
+    """Zone rectangulaire couvrant par défaut la moitié gauche de l'image.
+
+    `restricted` n'est plus un champ mais une **propriété dérivée du type** :
+    la fabrique traduit donc l'intention du test en type de zone. `TRANSIT` est
+    le contraire naturel d'`interdite` — on y passe sans que rien ne se
+    déclenche.
+    """
+    return config.SurveillanceZone(
+        name=name,
+        polygon=polygon,
+        zone_type=config.ZoneType.FORBIDDEN if restricted else config.ZoneType.TRANSIT,
+        **surcharges,
+    )
 
 
 def _at(x: float, y: float, *, height: float = 40.0) -> Detection:
@@ -250,7 +262,7 @@ def test_full_frame_zone_is_not_painted_over_the_video() -> None:
     regarde.
     """
     manager = _ready_manager(
-        config.ZoneConfig(
+        config.SurveillanceZone(
             name="Champ de la caméra",
             polygon=((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),
             draw=False,

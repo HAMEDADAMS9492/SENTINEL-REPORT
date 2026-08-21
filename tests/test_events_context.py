@@ -26,19 +26,9 @@ import config
 from sentinel.detection import Detection
 from sentinel.events import EventEngine, FrameContext, RuleOutcome
 from sentinel.tracker import TrackedObject
+from zone_doubles import FakeZones
 
 OUVERT = datetime(2026, 8, 13, 10, 0, 0)  # jeudi 10 h : site ouvert
-
-
-class _FakeZones:
-    """ZoneManager réduit à ce que le moteur lui demande."""
-
-    def __init__(self, restricted: list[str], names: list[str] | None = None) -> None:
-        self._restricted = restricted
-        self.names = names if names is not None else list(restricted)
-
-    def restricted_zone_names(self) -> list[str]:
-        return list(self._restricted)
 
 
 class _FakeTracker:
@@ -77,7 +67,7 @@ def _context(objets, *, zones=None, video_time: float = 10.0) -> FrameContext:
     return FrameContext(
         objects=tuple(objets),
         tracker=_FakeTracker(),
-        zones=zones or _FakeZones(["Quai"]),
+        zones=zones or FakeZones.restricted("Quai"),
         video_time=video_time,
         wall_time=OUVERT,
         frame=None,
@@ -120,7 +110,7 @@ def test_objects_can_be_counted_by_zone() -> None:
 
 def test_the_context_lists_the_surveyed_zones() -> None:
     """Une règle qui balaie les zones doit pouvoir les énumérer."""
-    contexte = _context([_obj(1)], zones=_FakeZones(["Quai"], names=["Quai", "Hall"]))
+    contexte = _context([_obj(1)], zones=FakeZones.restricted("Quai", "Hall"))
 
     assert contexte.zone_names == ("Quai", "Hall")
 
@@ -208,7 +198,7 @@ def test_events_are_emitted_object_by_object_not_rule_by_rule() -> None:
     l'ordre des règles ferait changer `SR-0001` et `SR-0002` de place sur la
     même vidéo, et le rapport cesserait d'être reproductible.
     """
-    engine = EventEngine(_FakeZones(["Quai"]))
+    engine = EventEngine(FakeZones.restricted("Quai"))
     objets = [_obj(1, zones={"Quai": 0.0}), _obj(2, zones={"Quai": 0.0})]
 
     events = engine.evaluate(objets, _FakeTracker(), None, 10.0, OUVERT)
@@ -225,7 +215,7 @@ def test_one_object_triggering_two_rules_keeps_the_rule_order() -> None:
     Une personne présente depuis 90 s dans une zone restreinte déclenche
     l'intrusion **puis** le rôdage — l'ordre de déclaration des règles.
     """
-    engine = EventEngine(_FakeZones(["Quai"]))
+    engine = EventEngine(FakeZones.restricted("Quai"))
     obj = _obj(1, zones={"Quai": 0.0}, age=90.0)
 
     events = engine.evaluate([obj], _FakeTracker(), None, 90.0, OUVERT)
@@ -245,7 +235,7 @@ def test_an_unhandled_rule_type_is_ignored_not_fatal() -> None:
         value = "type_sans_predicat"
 
     regle = config.EventRule(event_type=_TypeInconnu("x"))
-    engine = EventEngine(_FakeZones(["Quai"]), rules=(regle,))
+    engine = EventEngine(FakeZones.restricted("Quai"), rules=(regle,))
 
     assert engine.evaluate([_obj(1)], _FakeTracker(), None, 10.0, OUVERT) == []
 
@@ -274,7 +264,7 @@ def test_a_relational_rule_can_be_plugged_in() -> None:
     regle = config.EventRule(
         event_type=config.EventType.LOITERING, classes=("person",), min_duration_s=0.0
     )
-    engine = EventEngine(_FakeZones(["Quai"]), rules=(regle,))
+    engine = EventEngine(FakeZones.restricted("Quai"), rules=(regle,))
     engine._PREDICATES = {**EventEngine._PREDICATES, config.EventType.LOITERING: _attroupement}
 
     deux = [_obj(i, zones={"Quai": 0.0}) for i in (1, 2)]
@@ -302,7 +292,7 @@ def test_a_relational_rule_still_respects_the_cooldown() -> None:
             yield RuleOutcome(obj, "Quai", obj.age)
 
     regle = config.EventRule(event_type=config.EventType.INTRUSION, cooldown_s=60.0)
-    engine = EventEngine(_FakeZones(["Quai"]), rules=(regle,))
+    engine = EventEngine(FakeZones.restricted("Quai"), rules=(regle,))
     engine._PREDICATES = {config.EventType.INTRUSION: _tout_le_monde}
 
     obj = _obj(1, zones={"Quai": 0.0})

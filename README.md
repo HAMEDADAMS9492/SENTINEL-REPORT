@@ -743,14 +743,51 @@ pleinement testé.
 
 ```python
 ZONES = (
-    ZoneConfig(
+    SurveillanceZone(
         name="Quai de chargement",
         polygon=((0.05, 0.45), (0.45, 0.45), (0.45, 0.95), (0.05, 0.95)),
-        restricted=True,   # la seule présence y constitue une intrusion
-        draw=True,         # tracé sur la vidéo, contrairement au plein cadre
+        zone_type=ZoneType.FORBIDDEN,   # toute présence y est une infraction
+        draw=True,                      # tracé, contrairement au plein cadre
+    ),
+    SurveillanceZone(
+        name="Hall d'accueil",
+        polygon=((0.55, 0.40), (0.98, 0.40), (0.98, 0.98), (0.55, 0.98)),
+        zone_type=ZoneType.TRANSIT,     # on y passe : seul le rôdage compte
+        min_duration_s=90.0,            # plus tolérant qu'ailleurs
+        cooldown_s=300.0,
     ),
 )
 ```
+
+**Le type de zone décide des règles applicables.** Une zone `TRANSIT` ne lève
+jamais d'intrusion — traverser un hall est normal — mais signale le rôdage. Une
+zone `COUNTING` ne lève **rien** : compter les entrées d'un magasin ne doit pas
+produire un rapport par client.
+
+| Type | Ce qu'il attend | Règles levées |
+|---|---|---|
+| `FORBIDDEN` | Toute présence y est une infraction | les quatre |
+| `SCHEDULED` | Présence normale aux heures d'ouverture | rôdage, objet abandonné, hors horaires |
+| `TRANSIT` | On y passe, on n'y reste pas | rôdage, objet abandonné |
+| `SENSITIVE` | Le risque est l'objet déposé | objet abandonné, hors horaires |
+| `COUNTING` | Mesure de flux | aucune |
+
+**Les seuils se surchargent par zone.** `min_duration_s`, `cooldown_s` et
+`max_movement_ratio` valent `None` par défaut, ce qui signifie « suivre la valeur
+globale de `EVENT_RULES` ». Les renseigner permet d'être plus strict dans une
+réserve que dans un hall sans dupliquer le jeu de règles. `None` et une valeur
+identique à la globale ne sont pas la même chose : la première suit les
+ajustements futurs, la seconde les ignore.
+
+Une surcharge qui casserait l'invariant `cooldown_s > min_duration_s` est
+**refusée au démarrage** par `ZoneManager`, avec le nom de la zone et de la règle
+en cause. La découvrir au milieu de l'analyse d'une vidéo d'une heure coûterait
+l'analyse entière.
+
+**Un seul mécanisme de ciblage.** `EventRule.zones` a été supprimé : c'est la
+zone qui déclare les règles qu'elle accepte, jamais l'inverse. Deux mécanismes
+concurrents auraient exigé une règle de résolution de conflit — donc un
+paragraphe de plus ici, et une source d'erreur de plus dans la configuration.
 
 **Ajuster les seuils.** Tout se règle dans `config.py` :
 `MODEL.confidence` (sensibilité de la détection), `EVENT_RULES[*].min_duration_s`

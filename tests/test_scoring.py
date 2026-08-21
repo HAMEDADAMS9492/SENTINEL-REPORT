@@ -20,16 +20,10 @@ import config
 from sentinel.detection import Detection
 from sentinel.events import Event, EventEngine, PriorityScore
 from sentinel.tracker import TrackedObject
+from zone_doubles import FakeZones
 
 JOUR = datetime(2026, 8, 20, 10, 0, 0)  # jeudi 10 h : site ouvert
 NUIT = datetime(2026, 8, 20, 23, 30, 0)  # jeudi 23 h 30 : site fermé
-
-
-class _FakeZones:
-    """ZoneManager réduit au seul service utilisé par le moteur."""
-
-    def restricted_zone_names(self) -> list[str]:
-        return ["Champ de la caméra"]
 
 
 class _FakeTracker:
@@ -62,7 +56,7 @@ def _rule(event_type: config.EventType, **overrides) -> config.EventRule:
 
 
 def _engine(scoring: config.ScoringConfig | None = None) -> EventEngine:
-    return EventEngine(_FakeZones(), scoring=scoring)
+    return EventEngine(FakeZones.restricted("Champ de la caméra"), scoring=scoring)
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +269,7 @@ def test_scale_is_configurable_without_touching_the_code() -> None:
 def test_events_carry_their_score_through_the_engine() -> None:
     """Le score voyage avec l'incident, jusqu'au tableau et au CSV."""
     rule = _rule(config.EventType.INTRUSION, min_duration_s=1.0)
-    engine = EventEngine(_FakeZones(), rules=[rule])
+    engine = EventEngine(FakeZones.restricted("Champ de la caméra"), rules=[rule])
     obj = _obj()
     obj.zones = {"Champ de la caméra"}
     obj.zone_entry_time = {"Champ de la caméra": 0.0}

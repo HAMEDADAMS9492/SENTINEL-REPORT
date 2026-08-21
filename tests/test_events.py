@@ -18,8 +18,9 @@ import pytest
 
 import config
 from sentinel.detection import Detection
-from sentinel.events import Event, EventEngine
+from sentinel.events import Event, EventEngine, FrameContext
 from sentinel.tracker import TrackedObject
+from zone_doubles import FakeZones
 
 OPEN_HOURS = datetime(2026, 8, 13, 10, 0, 0)  # jeudi 10 h : site ouvert
 NIGHT = datetime(2026, 8, 13, 23, 30, 0)  # jeudi 23 h 30 : fermé
@@ -29,16 +30,6 @@ WEEKEND = datetime(2026, 8, 15, 10, 0, 0)  # samedi 10 h : fermé
 # ---------------------------------------------------------------------------
 # Doublures
 # ---------------------------------------------------------------------------
-
-
-class _FakeZones:
-    """ZoneManager réduit à ce que le moteur lui demande."""
-
-    def __init__(self, restricted: list[str]) -> None:
-        self._restricted = restricted
-
-    def restricted_zone_names(self) -> list[str]:
-        return list(self._restricted)
 
 
 class _FakeTracker:
@@ -87,7 +78,7 @@ def _obj(
 
 
 def _engine(restricted: list[str] | None = None, rules=None) -> EventEngine:
-    return EventEngine(_FakeZones(restricted or ["Quai"]), rules=rules)
+    return EventEngine(FakeZones.restricted(*(restricted or ["Quai"])), rules=rules)
 
 
 def _rule(event_type: config.EventType, **overrides) -> config.EventRule:
@@ -133,35 +124,68 @@ def test_to_dict_is_serialisable() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _zones_levees(engine, obj, rule, video_time: float) -> list[str]:
+    """Zones nommées par les constats d'une règle, via le chemin public.
+
+    Les tests interrogeaient auparavant `_check_intrusion()` et
+    `_check_loitering()`, deux prédicats mono-objet supprimés depuis : une zone
+    déclare désormais elle-même les incidents qu'elle accepte, et le même
+    mécanisme de séjour sert l'intrusion et le rôdage.
+    """
+    context = FrameContext(
+        objects=(obj,),
+        tracker=_FakeTracker(),
+        zones=engine._zones,
+        video_time=video_time,
+        wall_time=OPEN_HOURS,
+        frame=None,
+    )
+    return [constat.zone_name for constat in engine._dwell_outcomes(rule, context)]
+
+
 def test_intrusion_requires_the_minimum_duration() -> None:
-    """Traverser une zone restreinte ne déclenche rien ; y rester déclenche."""
+    """Traverser une zone interdite ne déclenche rien ; y rester déclenche."""
     engine = _engine(["Quai"])
     rule = _rule(config.EventType.INTRUSION, min_duration_s=3.0)
 
     crossing = _obj(zones={"Quai": 9.0})  # entré il y a 1 s
-    assert engine._check_intrusion(crossing, rule, video_time=10.0) is None
+    assert _zones_levees(engine, crossing, rule, 10.0) == []
 
     staying = _obj(zones={"Quai": 5.0})  # entré il y a 5 s
-    assert engine._check_intrusion(staying, rule, video_time=10.0) == "Quai"
+    assert _zones_levees(engine, staying, rule, 10.0) == ["Quai"]
 
 
-def test_intrusion_ignores_unrestricted_zones() -> None:
-    """La règle d'intrusion ne porte que sur les zones marquées restricted."""
-    engine = _engine(restricted=["Quai"])
+def test_intrusion_ignores_zones_that_do_not_declare_it() -> None:
+    """Une zone de transit ne lève jamais d'intrusion.
+
+    C'est la définition même du type : on y passe. Auparavant exprimé par
+    `restricted=False`, désormais par `ZoneType.TRANSIT` — la différence étant
+    que le type dit aussi ce que la zone **accepte**, et pas seulement ce
+    qu'elle refuse.
+    """
+    engine = EventEngine(
+        FakeZones.of_types(Quai=config.ZoneType.FORBIDDEN, Hall=config.ZoneType.TRANSIT)
+    )
     rule = _rule(config.EventType.INTRUSION, min_duration_s=3.0)
     obj = _obj(zones={"Hall": 0.0})
 
-    assert engine._check_intrusion(obj, rule, video_time=10.0) is None
+    assert _zones_levees(engine, obj, rule, 10.0) == []
 
 
-def test_loitering_applies_to_any_zone() -> None:
-    """Rôder devant une entrée non restreinte reste signalable."""
-    engine = _engine(restricted=["Quai"])
+def test_loitering_applies_to_a_transit_zone() -> None:
+    """Rôder dans un lieu de passage reste signalable.
+
+    Une zone `TRANSIT` refuse l'intrusion mais déclare le rôdage : traverser un
+    hall est normal, y stationner une minute ne l'est pas.
+    """
+    engine = EventEngine(
+        FakeZones.of_types(Quai=config.ZoneType.FORBIDDEN, Hall=config.ZoneType.TRANSIT)
+    )
     rule = _rule(config.EventType.LOITERING, min_duration_s=60.0)
     obj = _obj(zones={"Hall": 0.0})
 
-    assert engine._check_loitering(obj, rule, video_time=61.0) == "Hall"
-    assert engine._check_loitering(obj, rule, video_time=59.0) is None
+    assert _zones_levees(engine, obj, rule, 61.0) == ["Hall"]
+    assert _zones_levees(engine, obj, rule, 59.0) == []
 
 
 def test_zone_choice_is_deterministic_across_runs() -> None:
@@ -174,7 +198,7 @@ def test_zone_choice_is_deterministic_across_runs() -> None:
     rule = _rule(config.EventType.INTRUSION, min_duration_s=1.0)
     obj = _obj(zones={"Beta": 0.0, "Alpha": 0.0})
 
-    assert engine._check_intrusion(obj, rule, video_time=10.0) == "Alpha"
+    assert _zones_levees(engine, obj, rule, 10.0) == ["Alpha"]
 
 
 # ---------------------------------------------------------------------------

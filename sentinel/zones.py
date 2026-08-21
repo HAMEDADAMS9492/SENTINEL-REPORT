@@ -1,7 +1,15 @@
 """Gestion des zones polygonales — ÉTAPE 4.
 
-Responsabilité unique : répondre à la question « cet objet est-il dans cette
-zone ? ». Le module ne connaît ni les événements, ni les rapports.
+Responsabilité unique : répondre aux questions que le moteur de règles pose sur
+la géométrie — « cet objet est-il dans cette zone ? » et « cette zone
+accepte-t-elle ce type d'incident ? ». Le module ne lève aucun incident et ne
+connaît pas les rapports.
+
+Le second point mérite d'être justifié : faire répondre `zones.py` sur les
+**types** d'incidents pourrait passer pour une fuite de logique métier. Ce n'en
+est pas une. La zone ne décide pas qu'un incident a lieu, elle décrit ce qu'elle
+surveille — c'est une propriété du périmètre, au même titre que son polygone. Le
+moteur reste seul à évaluer les conditions et à produire des `Event`.
 
 Choix de la librairie
 ---------------------
@@ -63,7 +71,7 @@ class ZoneManager:
     de la vidéo connue, d'où la méthode `initialize()` séparée du constructeur.
     """
 
-    def __init__(self, zones: Sequence[config.ZoneConfig] | None = None) -> None:
+    def __init__(self, zones: Sequence[config.SurveillanceZone] | None = None) -> None:
         """Prépare le gestionnaire à partir de la configuration.
 
         Args:
@@ -75,14 +83,14 @@ class ZoneManager:
         selected = config.ZONES if zones is None else tuple(zones)
         self._validate(selected)
 
-        self._zones: tuple[config.ZoneConfig, ...] = selected
-        self._by_name: dict[str, config.ZoneConfig] = {zone.name: zone for zone in selected}
+        self._zones: tuple[config.SurveillanceZone, ...] = selected
+        self._by_name: dict[str, config.SurveillanceZone] = {zone.name: zone for zone in selected}
 
         # Résolution inconnue tant qu'aucune frame n'a été vue.
         self._frame_size: tuple[int, int] | None = None
         self._polygons: dict[str, np.ndarray] = {}
 
-    def _validate(self, zones: Sequence[config.ZoneConfig]) -> None:
+    def _validate(self, zones: Sequence[config.SurveillanceZone]) -> None:
         """Vérifie la cohérence des zones configurées.
 
         La validation a lieu **à la construction**, donc au démarrage de
@@ -129,6 +137,19 @@ class ZoneManager:
                         f"Zone '{zone.name}', sommet {index} = ({x}, {y}) : les "
                         "coordonnées sont normalisées et doivent tenir dans [0, 1]."
                     )
+
+            # Les surcharges de seuils sont éprouvées ici, au démarrage, contre
+            # toutes les règles qui s'appliqueront dans cette zone. Une zone qui
+            # exigerait 120 s de présence tout en autorisant un redéclenchement
+            # toutes les 60 s produirait un rapport par frame — et on ne le
+            # découvrirait qu'en pleine analyse.
+            for rule in config.EVENT_RULES:
+                if not zone.handles(rule.event_type):
+                    continue
+                try:
+                    zone.rule_for(rule)
+                except ValueError as exc:
+                    raise ZoneConfigurationError(str(exc)) from exc
 
     def initialize(self, frame_shape: tuple[int, ...]) -> None:
         """Convertit les polygones normalisés en pixels pour une résolution donnée.
@@ -248,8 +269,77 @@ class ZoneManager:
         return located
 
     def restricted_zone_names(self) -> list[str]:
-        """Noms des zones marquées `restricted=True` dans la configuration."""
+        """Noms des zones où la seule présence constitue une infraction.
+
+        Dérivé du **type** de zone, plus d'un drapeau indépendant : un booléen
+        `restricted` à côté d'un `zone_type` finirait par le contredire.
+        """
         return [zone.name for zone in self._zones if zone.restricted]
+
+    def zone(self, name: str) -> config.SurveillanceZone | None:
+        """Zone portant ce nom.
+
+        Args:
+            name: Nom recherché.
+
+        Returns:
+            La zone, ou `None` si elle est inconnue.
+        """
+        return self._by_name.get(name)
+
+    def zones_handling(self, event_type: config.EventType) -> list[str]:
+        """Noms des zones qui acceptent de lever ce type d'incident.
+
+        C'est le **seul** mécanisme de ciblage du projet : une règle ne déclare
+        plus les zones où elle s'applique, c'est la zone qui déclare les règles
+        qu'elle accepte. Deux mécanismes concurrents auraient exigé une règle de
+        résolution de conflit — donc une explication de plus dans le README, et
+        une source d'erreur de plus dans la configuration.
+
+        Args:
+            event_type: Type d'incident envisagé.
+
+        Returns:
+            Les noms des zones concernées, dans l'ordre de la configuration.
+        """
+        return [zone.name for zone in self._zones if zone.handles(event_type)]
+
+    def rule_for(self, zone_name: str, rule: config.EventRule) -> config.EventRule:
+        """Règle telle qu'elle s'applique dans une zone donnée.
+
+        Args:
+            zone_name: Zone concernée.
+            rule: Règle globale issue de `config.EVENT_RULES`.
+
+        Returns:
+            La règle ajustée aux surcharges de la zone, ou la règle d'origine si
+            la zone ne surcharge rien — ou si elle est inconnue, auquel cas la
+            valeur globale est le repli le plus sûr.
+        """
+        zone = self._by_name.get(zone_name)
+        return rule if zone is None else zone.rule_for(rule)
+
+    def shortest_cooldown(self, rule: config.EventRule) -> float:
+        """Plus court délai de garde applicable à cette règle, toutes zones confondues.
+
+        Sert de **pré-filtre** : le moteur écarte très tôt les objets qui ne
+        peuvent redéclencher nulle part, sans avoir à évaluer le prédicat. Prendre
+        le plus court est le seul choix correct — retenir le délai global écarterait
+        à tort un objet qu'une zone plus permissive autoriserait à redéclencher.
+        Le délai exact est ensuite revérifié zone par zone au moment de publier.
+
+        Args:
+            rule: Règle globale.
+
+        Returns:
+            Le délai le plus court, en secondes.
+        """
+        delais = [
+            zone.rule_for(rule).cooldown_s
+            for zone in self._zones
+            if zone.handles(rule.event_type)
+        ]
+        return min([rule.cooldown_s, *delais])
 
     def color_for(self, name: str) -> tuple[int, int, int] | None:
         """Couleur BGR déclarée par une zone.
@@ -339,7 +429,9 @@ class ZoneManager:
                 thickness=config.UI.box_thickness,
             )
 
-            label = _ascii_label(name if not zone.restricted else f"{name} [RESTREINTE]")
+            # Le type est plus informatif que « restreinte » : un opérateur
+            # doit pouvoir lire sur l'image ce que la zone attend.
+            label = _ascii_label(f"{name} [{zone.zone_type.value.upper()}]")
             anchor_x, anchor_y = polygon[polygon[:, 1].argmin()]
             cv2.putText(
                 annotated,

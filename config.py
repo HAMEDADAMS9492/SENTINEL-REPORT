@@ -265,93 +265,7 @@ TRACKING: Final[TrackingConfig] = TrackingConfig()
 
 
 # ---------------------------------------------------------------------------
-# 4. Zones surveillées (zones.py)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ZoneConfig:
-    """Une zone polygonale surveillée.
-
-    Les sommets sont exprimés en **coordonnées normalisées** (0.0-1.0) plutôt
-    qu'en pixels : la même définition de zone fonctionne quelle que soit la
-    résolution de la vidéo (720p, 1080p, webcam). `ZoneManager` les convertit en
-    pixels une fois la première frame connue.
-
-    Attributes:
-        name: Identifiant lisible, réutilisé dans les rapports.
-        polygon: Sommets ((x, y), ...) normalisés, dans l'ordre du tracé.
-        restricted: True si la simple présence y constitue une intrusion.
-        color: Couleur d'affichage BGR (convention OpenCV).
-        draw: Tracer la zone sur la vidéo annotée. À laisser à False pour une
-            zone couvrant tout le champ : la remplir teinterait l'image entière
-            sans rien apprendre à l'opérateur.
-    """
-
-    name: str
-    polygon: tuple[tuple[float, float], ...]
-    restricted: bool = True
-    color: tuple[int, int, int] = (0, 0, 255)
-    draw: bool = True
-
-
-# Surveillance globale : une seule zone, qui couvre l'intégralité de l'image.
-#
-# C'est le mode par défaut — tout ce qui est visible est surveillé. Le découpage
-# en sous-zones reste possible et pleinement fonctionnel : il suffit de remplacer
-# l'entrée ci-dessous par plusieurs `ZoneConfig` aux polygones normalisés (voir
-# la section « Adapter les zones » du README). La machinerie de `zones.py` ne
-# change pas ; seul le périmètre surveillé change.
-#
-# Pourquoi conserver une zone plutôt que de supprimer le mécanisme : toutes les
-# règles temporelles reposent sur un chronomètre « depuis quand cet objet est-il
-# ICI ». Sans périmètre nommé, il n'y a plus de « ici », donc plus de durée, donc
-# plus d'incident. La zone plein cadre est le périmètre le plus simple possible.
-ZONES: Final[tuple[ZoneConfig, ...]] = (
-    ZoneConfig(
-        name="Champ de la caméra",
-        polygon=((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),
-        restricted=True,
-        color=(0, 0, 255),
-        draw=False,
-    ),
-)
-
-
-@dataclass(frozen=True)
-class GeometryConfig:
-    """Comment décider qu'un objet « est dans » une zone.
-
-    Les deux compteurs de frames forment une **hystérésis** : il faut plusieurs
-    frames pour entrer dans une zone, et plusieurs frames pour en sortir. Sans
-    cette asymétrie, le bruit de détection — une boîte qui tremble de quelques
-    pixels sur la frontière — ferait osciller l'appartenance d'une frame à
-    l'autre, et **remettrait à zéro le chronomètre d'intrusion** à chaque
-    oscillation. Une intrusion de 50 secondes ne serait alors jamais signalée.
-
-    Attributes:
-        anchor: Point de la boîte testé contre le polygone.
-            `"bottom_center"` = point d'appui au sol : c'est le bon choix pour
-            une caméra en plongée, car le centre de la boîte d'une personne
-            debout peut être hors zone alors que ses pieds y sont.
-        min_overlap_frames: Frames consécutives dans la zone avant de valider
-            l'entrée. Filtre les incursions d'une frame dues au bruit.
-        exit_tolerance_frames: Frames consécutives hors de la zone avant de
-            valider la sortie. Plus élevé que l'entrée : perdre un objet est
-            plus fréquent que le détecter à tort, et une sortie prématurée coûte
-            un incident manqué.
-    """
-
-    anchor: str = "bottom_center"
-    min_overlap_frames: int = 2
-    exit_tolerance_frames: int = 4
-
-
-GEOMETRY: Final[GeometryConfig] = GeometryConfig()
-
-
-# ---------------------------------------------------------------------------
-# 5. Règles d'événements (events.py)
+# 4. Vocabulaire des incidents (events.py)
 # ---------------------------------------------------------------------------
 
 
@@ -407,6 +321,264 @@ def worst_severity(severities: Sequence[Severity]) -> Severity | None:
     return max(severities, key=lambda niveau: niveau.rank, default=None)
 
 
+# ---------------------------------------------------------------------------
+# 5. Zones surveillées (zones.py)
+# ---------------------------------------------------------------------------
+
+
+class ZoneType(str, Enum):
+    """Ce qu'une zone **attend** de ce qui s'y passe.
+
+    Un polygone plus un booléen `restricted` ne suffisait pas à décrire un
+    périmètre réel. Un quai de chargement, un hall d'accueil et une réserve
+    n'appellent pas les mêmes règles : rôder dans un hall est banal, rôder dans
+    une réserve ne l'est pas, et compter les passages à une porte ne doit lever
+    aucun incident du tout.
+
+    Le type conditionne donc **quelles règles s'appliquent** dans la zone. Les
+    règles cessent d'être globales : c'est la zone qui déclare ce qu'elle
+    surveille. Un seul mécanisme de ciblage, donc aucun conflit à arbitrer entre
+    « la zone dit non » et « la règle dit oui ».
+    """
+
+    FORBIDDEN = "interdite"
+    SCHEDULED = "horaires"
+    TRANSIT = "transit"
+    SENSITIVE = "sensible"
+    COUNTING = "comptage"
+
+    @property
+    def event_types(self) -> tuple["EventType", ...]:
+        """Types d'incidents que ce genre de zone peut lever.
+
+        Returns:
+            Les types applicables, éventuellement aucun.
+        """
+        return _ZONE_EVENT_TYPES[self]
+
+    @property
+    def is_restricted(self) -> bool:
+        """True si la seule présence y constitue une infraction."""
+        return self is ZoneType.FORBIDDEN
+
+    @property
+    def description(self) -> str:
+        """Phrase explicative, reprise dans l'interface et la documentation."""
+        return _ZONE_DESCRIPTIONS[self]
+
+
+# Ce que chaque type de zone accepte de signaler. Écrit comme une table plutôt
+# que dispersé dans le moteur : lire ces cinq entrées doit suffire à savoir ce
+# qu'une zone déclenche.
+_ZONE_EVENT_TYPES: Final[dict[ZoneType, tuple["EventType", ...]]] = {
+    # Toute présence est anormale : rien n'est écarté.
+    ZoneType.FORBIDDEN: (
+        EventType.INTRUSION,
+        EventType.LOITERING,
+        EventType.ABANDONED_OBJECT,
+        EventType.AFTER_HOURS,
+    ),
+    # Présence normale aux heures d'ouverture. Pas d'intrusion, donc, mais tout
+    # le reste : la nuit, un stationnement prolongé ou un objet déposé comptent.
+    ZoneType.SCHEDULED: (
+        EventType.LOITERING,
+        EventType.ABANDONED_OBJECT,
+        EventType.AFTER_HOURS,
+    ),
+    # On y passe, on n'y reste pas. Traverser ne déclenche rien — c'est la
+    # définition même d'un lieu de transit — mais s'y arrêter, si.
+    ZoneType.TRANSIT: (EventType.LOITERING, EventType.ABANDONED_OBJECT),
+    # Lieu où un objet déposé est le vrai risque : quai, salle d'attente, hall
+    # de gare. La présence de personnes y est normale et prolongée.
+    ZoneType.SENSITIVE: (EventType.ABANDONED_OBJECT, EventType.AFTER_HOURS),
+    # Mesure de flux uniquement. Ne lever aucun incident est une décision, pas
+    # un oubli : compter les entrées d'un magasin ne doit pas produire un
+    # rapport par client.
+    ZoneType.COUNTING: (),
+}
+
+_ZONE_DESCRIPTIONS: Final[dict[ZoneType, str]] = {
+    ZoneType.FORBIDDEN: "Toute présence y constitue une infraction.",
+    ZoneType.SCHEDULED: "Présence normale aux heures d'ouverture, anormale en dehors.",
+    ZoneType.TRANSIT: "On y passe : seule la présence prolongée déclenche.",
+    ZoneType.SENSITIVE: "Lieu où un objet abandonné est le risque principal.",
+    ZoneType.COUNTING: "Mesure de flux : aucun incident n'y est levé.",
+}
+
+
+@dataclass(frozen=True)
+class SurveillanceZone:
+    """Une zone surveillée : géométrie, nature, et seuils qui lui sont propres.
+
+    Remplace l'ancien `ZoneConfig` (polygone + booléen `restricted`), qui ne
+    permettait pas d'exprimer qu'un hall et une réserve n'appellent pas les
+    mêmes règles.
+
+    Les sommets restent exprimés en **coordonnées normalisées** (0.0-1.0) : la
+    même définition fonctionne quelle que soit la résolution de la vidéo.
+    `ZoneManager` les convertit en pixels une fois la première frame connue.
+
+    Surcharges de seuils
+    --------------------
+    Les trois champs `min_duration_s`, `cooldown_s` et `max_movement_ratio`
+    valent `None` par défaut, ce qui signifie « prendre la valeur globale de
+    `EVENT_RULES` ». Les renseigner permet d'être plus strict dans une réserve
+    que dans un hall sans dupliquer le jeu de règles. `None` et une valeur
+    identique à la globale ne sont pas la même chose : la première suit les
+    ajustements futurs de la configuration, la seconde les ignore.
+
+    Attributes:
+        name: Identifiant lisible, réutilisé dans les rapports. Sert de clé.
+        polygon: Sommets ((x, y), ...) normalisés, dans l'ordre du tracé.
+        zone_type: Nature de la zone — conditionne les règles applicables.
+        color: Couleur d'affichage BGR (convention OpenCV). Sert aussi à colorer
+            les objets en infraction dans cette zone.
+        draw: Tracer la zone sur la vidéo annotée. À laisser à False pour une
+            zone couvrant tout le champ : la remplir teinterait l'image entière
+            sans rien apprendre à l'opérateur.
+        min_duration_s: Durée de déclenchement propre à la zone. `None` = valeur
+            de la règle globale.
+        cooldown_s: Délai de garde propre à la zone. `None` = valeur globale.
+        max_movement_ratio: Seuil d'immobilité propre à la zone, en fraction de
+            la hauteur apparente de l'objet. `None` = valeur globale.
+        crossing_line: Nom de la ligne de comptage associée, pour une zone de
+            type `COUNTING`. `None` = pas de ligne.
+    """
+
+    name: str
+    polygon: tuple[tuple[float, float], ...]
+    zone_type: ZoneType = ZoneType.FORBIDDEN
+    color: tuple[int, int, int] = (0, 0, 255)
+    draw: bool = True
+    min_duration_s: float | None = None
+    cooldown_s: float | None = None
+    max_movement_ratio: float | None = None
+    crossing_line: str | None = None
+
+    @property
+    def restricted(self) -> bool:
+        """True si la seule présence y constitue une intrusion.
+
+        Conservé comme propriété **dérivée** du type : le drapeau reste lisible
+        là où il suffit (couleur d'alerte, étiquette dessinée) sans redevenir une
+        seconde source de vérité qu'on pourrait mettre en contradiction avec le
+        type.
+        """
+        return self.zone_type.is_restricted
+
+    def handles(self, event_type: EventType) -> bool:
+        """Indique si cette zone accepte de lever ce type d'incident.
+
+        Args:
+            event_type: Type d'incident envisagé.
+
+        Returns:
+            True si le type de la zone le déclare.
+        """
+        return event_type in self.zone_type.event_types
+
+    def rule_for(self, rule: EventRule) -> EventRule:
+        """Règle globale ajustée aux seuils propres à cette zone.
+
+        Args:
+            rule: Règle issue de `EVENT_RULES`.
+
+        Returns:
+            La règle telle qu'elle s'applique **ici**. La règle d'origine est
+            rendue telle quelle si la zone ne surcharge rien : pas de copie
+            inutile, et l'identité rend visible l'absence de surcharge.
+
+        Raises:
+            ValueError: Si les surcharges cassent l'invariant
+                `cooldown_s > min_duration_s`. Une zone qui exige 120 s de
+                présence mais autorise un redéclenchement toutes les 60 s
+                produirait un rapport par frame.
+        """
+        surcharges = {
+            nom: valeur
+            for nom, valeur in (
+                ("min_duration_s", self.min_duration_s),
+                ("cooldown_s", self.cooldown_s),
+                ("max_movement_ratio", self.max_movement_ratio),
+            )
+            if valeur is not None
+        }
+        if not surcharges:
+            return rule
+
+        ajustee = replace(rule, **surcharges)
+        if ajustee.cooldown_s <= ajustee.min_duration_s:
+            raise ValueError(
+                f"Zone « {self.name} » : cooldown_s ({ajustee.cooldown_s:g} s) doit "
+                f"dépasser min_duration_s ({ajustee.min_duration_s:g} s) pour la règle "
+                f"{rule.event_type.value}, sinon l'anti-rebond est sans effet."
+            )
+        return ajustee
+
+
+# Surveillance globale : une seule zone, qui couvre l'intégralité de l'image.
+#
+# C'est le mode par défaut — tout ce qui est visible est surveillé. Le découpage
+# en sous-zones reste possible et pleinement fonctionnel : il suffit de remplacer
+# l'entrée ci-dessous par plusieurs `SurveillanceZone` aux polygones normalisés
+# (voir la section « Adapter les zones » du README). La machinerie de `zones.py`
+# ne change pas ; seuls le périmètre et les règles applicables changent.
+#
+# Pourquoi conserver une zone plutôt que de supprimer le mécanisme : toutes les
+# règles temporelles reposent sur un chronomètre « depuis quand cet objet est-il
+# ICI ». Sans périmètre nommé, il n'y a plus de « ici », donc plus de durée, donc
+# plus d'incident. La zone plein cadre est le périmètre le plus simple possible.
+#
+# Son type est `FORBIDDEN` : c'est le seul qui déclare les quatre règles, donc
+# celui qui correspond à « surveiller tout ce qui s'affiche ».
+ZONES: Final[tuple[SurveillanceZone, ...]] = (
+    SurveillanceZone(
+        name="Champ de la caméra",
+        polygon=((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),
+        zone_type=ZoneType.FORBIDDEN,
+        color=(0, 0, 255),
+        draw=False,
+    ),
+)
+
+
+@dataclass(frozen=True)
+class GeometryConfig:
+    """Comment décider qu'un objet « est dans » une zone.
+
+    Les deux compteurs de frames forment une **hystérésis** : il faut plusieurs
+    frames pour entrer dans une zone, et plusieurs frames pour en sortir. Sans
+    cette asymétrie, le bruit de détection — une boîte qui tremble de quelques
+    pixels sur la frontière — ferait osciller l'appartenance d'une frame à
+    l'autre, et **remettrait à zéro le chronomètre d'intrusion** à chaque
+    oscillation. Une intrusion de 50 secondes ne serait alors jamais signalée.
+
+    Attributes:
+        anchor: Point de la boîte testé contre le polygone.
+            `"bottom_center"` = point d'appui au sol : c'est le bon choix pour
+            une caméra en plongée, car le centre de la boîte d'une personne
+            debout peut être hors zone alors que ses pieds y sont.
+        min_overlap_frames: Frames consécutives dans la zone avant de valider
+            l'entrée. Filtre les incursions d'une frame dues au bruit.
+        exit_tolerance_frames: Frames consécutives hors de la zone avant de
+            valider la sortie. Plus élevé que l'entrée : perdre un objet est
+            plus fréquent que le détecter à tort, et une sortie prématurée coûte
+            un incident manqué.
+    """
+
+    anchor: str = "bottom_center"
+    min_overlap_frames: int = 2
+    exit_tolerance_frames: int = 4
+
+
+GEOMETRY: Final[GeometryConfig] = GeometryConfig()
+
+
+# ---------------------------------------------------------------------------
+# 6. Règles d'événements (events.py)
+# ---------------------------------------------------------------------------
+
+
 @dataclass(frozen=True)
 class EventRule:
     """Règle déclenchant un événement.
@@ -417,7 +589,6 @@ class EventRule:
     Attributes:
         event_type: Type d'incident produit.
         classes: Classes concernées. Tuple vide = toutes les classes surveillées.
-        zones: Noms de zones concernées. `None` = toutes les zones.
         min_duration_s: Durée minimale de la condition avant déclenchement.
             C'est ce qui distingue une intrusion d'un simple passage.
         cooldown_s: Délai avant qu'un même objet puisse redéclencher le même
@@ -443,7 +614,6 @@ class EventRule:
 
     event_type: EventType
     classes: tuple[str, ...] = ()
-    zones: tuple[str, ...] | None = None
     min_duration_s: float = 3.0
     cooldown_s: float = 60.0
     severity: Severity = Severity.MEDIUM
@@ -503,7 +673,6 @@ EVENT_RULES: Final[tuple[EventRule, ...]] = (
     EventRule(
         event_type=EventType.INTRUSION,
         classes=("person",),
-        zones=None,  # résolu par EventEngine aux zones marquées restricted=True
         min_duration_s=3.0,
         cooldown_s=60.0,
         severity=Severity.HIGH,
@@ -514,7 +683,6 @@ EVENT_RULES: Final[tuple[EventRule, ...]] = (
         # avec un seuil de durée bien plus élevé et une gravité moindre.
         event_type=EventType.LOITERING,
         classes=("person",),
-        zones=None,
         min_duration_s=60.0,
         cooldown_s=180.0,
         severity=Severity.MEDIUM,
@@ -522,7 +690,6 @@ EVENT_RULES: Final[tuple[EventRule, ...]] = (
     EventRule(
         event_type=EventType.ABANDONED_OBJECT,
         classes=("backpack", "handbag", "suitcase"),
-        zones=None,
         min_duration_s=30.0,
         cooldown_s=300.0,
         severity=Severity.HIGH,
@@ -540,7 +707,6 @@ EVENT_RULES: Final[tuple[EventRule, ...]] = (
     EventRule(
         event_type=EventType.AFTER_HOURS,
         classes=("person",),
-        zones=None,
         min_duration_s=5.0,
         cooldown_s=120.0,
         severity=Severity.MEDIUM,
@@ -566,7 +732,7 @@ class ScheduleConfig:
 SCHEDULE: Final[ScheduleConfig] = ScheduleConfig()
 
 # ---------------------------------------------------------------------------
-# 5 bis. Score de priorité (events.py)
+# 6 bis. Score de priorité (events.py)
 # ---------------------------------------------------------------------------
 
 
@@ -706,7 +872,7 @@ TIMELINE: Final[TimelineConfig] = TimelineConfig()
 
 
 # ---------------------------------------------------------------------------
-# 6. Preuves visuelles
+# 7. Preuves visuelles
 # ---------------------------------------------------------------------------
 
 
@@ -738,7 +904,7 @@ EVIDENCE: Final[EvidenceConfig] = EvidenceConfig()
 
 
 # ---------------------------------------------------------------------------
-# 7. Génération de rapports
+# 8. Génération de rapports
 # ---------------------------------------------------------------------------
 
 
@@ -808,7 +974,7 @@ LLM: Final[LLMConfig] = LLMConfig()
 
 
 # ---------------------------------------------------------------------------
-# 8. Traitement vidéo et interface
+# 9. Traitement vidéo et interface
 # ---------------------------------------------------------------------------
 
 
@@ -1020,7 +1186,7 @@ UI: Final[UIConfig] = UIConfig()
 
 
 # ---------------------------------------------------------------------------
-# 9. Journalisation
+# 10. Journalisation
 # ---------------------------------------------------------------------------
 
 LOG_LEVEL: Final[str] = os.environ.get("SENTINEL_LOG_LEVEL", "INFO")
