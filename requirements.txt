@@ -21,6 +21,13 @@
 # comportement que ce projet refuse — d'où sa déclaration explicite ici, au même
 # titre que les poids récupérés par `download_models.py`.
 #
+# Note supervision : la dépendance a été RETIRÉE. Elle n'était plus utilisée
+# nulle part : `zones.py` teste l'appartenance aux polygones avec
+# `cv2.pointPolygonTest` (même algorithme du lancer de rayon, sans les ~30 Mo
+# de PyAV), et la seule fonction qui l'importait — `detection.to_supervision()` —
+# n'avait aucun appelant, tests compris. Déclarer une dépendance « au cas où »
+# fait payer son coût d'installation sans rien rendre en échange.
+#
 # Note OpenCV : « opencv-python-headless » a été remplacé par « opencv-python ».
 # Ultralytics dépend lui-même de opencv-python ; déclarer la variante headless
 # en plus installait DEUX distributions fournissant le même module `cv2`, ce qui
@@ -29,7 +36,6 @@
 # --- Vision par ordinateur ---
 ultralytics>=8.3.0,<9.0.0      # YOLOv8 + tracker ByteTrack intégré (mode .track())
 opencv-python>=4.9.0           # lecture vidéo / webcam, dessin, test point-dans-polygone
-supervision>=0.25.0            # conversion de détections, annotateurs (Roboflow)
 lap>=0.5.12                    # algorithme hongrois utilisé par ByteTrack — voir note
 numpy>=1.24.0                  # borne haute retirée : voir la note ci-dessous
 

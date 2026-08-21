@@ -16,9 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Iterable, Sequence
-
-import numpy as np
+from typing import Iterable
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,46 +113,6 @@ class Detection:
         if show_confidence:
             parts.append(f"{self.confidence:.2f}")
         return " ".join(parts)
-
-
-def to_supervision(detections: Sequence[Detection]):
-    """Convertit une liste de `Detection` en `supervision.Detections`.
-
-    Point de passage unique vers la librairie `supervision` (Roboflow), utilisée
-    pour les tests d'appartenance aux polygones (`zones.py`) et les annotateurs
-    (`app.py`). Concentrer la conversion ici évite de disperser la dépendance
-    dans tout le code : si `supervision` change d'API, une seule fonction est à
-    corriger.
-
-    Args:
-        detections: Détections à convertir.
-
-    Returns:
-        Un objet `supervision.Detections` (vide si la liste d'entrée est vide).
-
-    Raises:
-        ImportError: Si `supervision` n'est pas installé.
-    """
-    import supervision as sv  # import local : dépendance optionnelle au détecteur
-
-    if not detections:
-        return sv.Detections.empty()
-
-    xyxy = np.array([d.xyxy for d in detections], dtype=np.float32)
-    confidence = np.array([d.confidence for d in detections], dtype=np.float32)
-    class_id = np.array([d.class_id for d in detections], dtype=int)
-
-    tracker_id = None
-    if all(d.track_id is not None for d in detections):
-        tracker_id = np.array([d.track_id for d in detections], dtype=int)
-
-    return sv.Detections(
-        xyxy=xyxy,
-        confidence=confidence,
-        class_id=class_id,
-        tracker_id=tracker_id,
-        data={"class_name": np.array([d.class_name for d in detections])},
-    )
 
 
 def count_by_class(detections: Iterable[Detection]) -> dict[str, int]:

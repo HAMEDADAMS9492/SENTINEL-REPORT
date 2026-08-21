@@ -14,8 +14,11 @@ façon une dépendance obligatoire du projet (lecture vidéo, dessin).
 L'argument de la vectorisation ne tient pas à cette échelle : avec au plus
 `config.MODEL.max_detections` objets et deux ou trois zones, on compte quelques
 dizaines d'appels par frame, soit quelques microsecondes — sans commune mesure
-avec les ~140 ms d'inférence YOLO qui les précèdent. `sentinel.detection`
-conserve `to_supervision()` pour les annotateurs éventuels de l'interface.
+avec les ~140 ms d'inférence YOLO qui les précèdent.
+
+La dépendance a donc été retirée du projet, y compris la fonction de
+conversion `to_supervision()` qui la gardait en vie sans appelant : un
+argumentaire qui refuse une librairie tout en l'installant ne tient pas.
 """
 
 from __future__ import annotations
