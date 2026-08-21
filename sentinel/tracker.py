@@ -78,6 +78,10 @@ class TrackedObject:
         zone_entry_time: Temps vidéo d'entrée dans chaque zone occupée.
         last_event_time: Temps vidéo du dernier événement levé, par type
             d'événement — support de l'anti-rebond.
+        owner_votes: Votes pour le propriétaire présumé, par `track_id`. Comme
+            pour la classe, on vote plutôt qu'on ne retient la première réponse :
+            à l'apparition d'un sac, la personne la plus proche sur une frame
+            isolée peut être un passant.
     """
 
     track_id: int
@@ -100,6 +104,8 @@ class TrackedObject:
     # serait celle de la toute première frame, souvent la moins fiable puisque
     # l'objet y est le plus petit ou le plus partiellement visible.
     class_votes: Counter[str] = field(default_factory=Counter)
+    # Votes pour le porteur présumé. Voir `bind_owner` et `owner_id`.
+    owner_votes: Counter[int] = field(default_factory=Counter)
     # Compteurs d'hystérésis sur les frontières de zone.
     _pending_zones: dict[str, tuple[int, float]] = field(default_factory=dict)
     _absent_zones: dict[str, int] = field(default_factory=dict)
@@ -267,6 +273,36 @@ class TrackedObject:
                 # Absence tolérée : le chronomètre continue de courir. C'est
                 # exactement le cas d'une boîte qui tremble sur la frontière.
                 self._absent_zones[zone] = missed
+
+    def bind_owner(self, track_id: int) -> None:
+        """Enregistre un vote pour le propriétaire présumé de cet objet.
+
+        Appelée à chaque frame de la fenêtre d'association. Le vote — plutôt que
+        la première réponse — évite qu'un passant traversant le champ à la
+        seconde où le sac apparaît n'en devienne le porteur pour toute la
+        session.
+
+        Args:
+            track_id: Identifiant du candidat propriétaire.
+        """
+        self.owner_votes[track_id] += 1
+
+    @property
+    def owner_id(self) -> int | None:
+        """Propriétaire présumé, ou `None` si l'objet est apparu seul.
+
+        `None` n'est pas un cas d'erreur : un sac déjà posé au démarrage de
+        l'analyse n'a pas de porteur observable. C'est ce qui impose de garder un
+        chemin de repli dans la règle « objet abandonné ».
+
+        Returns:
+            L'identifiant le plus voté, ou `None`.
+        """
+        if not self.owner_votes:
+            return None
+        # `most_common` n'ordonne pas les égalités : trier sur (-votes, id) rend
+        # le choix reproductible d'une exécution à l'autre.
+        return min(self.owner_votes.items(), key=lambda item: (-item[1], item[0]))[0]
 
     def dwell_time(self, zone_name: str, video_time: float) -> float:
         """Durée passée sans interruption dans une zone.

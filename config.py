@@ -715,6 +715,16 @@ class EventRule:
             zone est réputée surchargée. `None` = critère non appliqué. C'est le
             seul champ de règle qui porte sur un **ensemble** d'objets et non sur
             un objet isolé.
+        owner_binding_s: Fenêtre, en secondes de temps vidéo, pendant laquelle un
+            objet peut se voir attribuer un propriétaire présumé. Passé ce délai,
+            l'association est figée : une personne qui passe devant un sac déjà
+            posé n'en devient pas le porteur.
+
+            Quelques secondes suffisent, et il ne faut pas plus : la personne qui
+            dépose un objet est celle qui l'accompagnait à son apparition dans le
+            champ. Élargir la fenêtre reviendrait à désigner un passant.
+        owner_classes: Classes pouvant être propriétaires. Un sac n'appartient
+            pas à une voiture.
     """
 
     event_type: EventType
@@ -728,6 +738,8 @@ class EventRule:
     owner_radius_px: float = 150.0
     owner_radius_ratio: float | None = None
     min_occupancy: int | None = None
+    owner_binding_s: float = 5.0
+    owner_classes: tuple[str, ...] = ("person",)
 
 
 def scaled_rules(
@@ -809,6 +821,11 @@ EVENT_RULES: Final[tuple[EventRule, ...]] = (
         requires_no_owner=True,
         owner_radius_ratio=3.0,
         owner_radius_px=150.0,
+        # Le porteur est celui qui accompagnait l'objet à son apparition. Cinq
+        # secondes suffisent à l'identifier, et il ne faut pas plus : au-delà,
+        # on désignerait un passant.
+        owner_binding_s=5.0,
+        owner_classes=("person",),
     ),
     EventRule(
         event_type=EventType.AFTER_HOURS,

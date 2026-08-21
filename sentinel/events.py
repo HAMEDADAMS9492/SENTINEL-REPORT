@@ -582,8 +582,16 @@ class EventEngine:
     def _abandoned_outcomes(
         self, rule: config.EventRule, context: FrameContext
     ) -> Iterator[RuleOutcome]:
-        """Constats d'objet abandonné : immobile, ancien, et sans propriétaire proche."""
+        """Constats d'objet abandonné : immobile, ancien, et délaissé par son porteur.
+
+        L'association au porteur se fait **ici**, à chaque frame de la fenêtre
+        `owner_binding_s`, et non au moment où la règle se déclenche : quand un
+        sac est immobile depuis trente secondes, la personne qui l'a posé est
+        partie depuis longtemps. Il faut avoir regardé au bon moment.
+        """
         for obj in context.candidates(rule):
+            self._bind_owner(obj, rule, context)
+
             if not context.zone_allows(obj, rule.event_type):
                 continue
             zone_name = self._reported_zone(obj, rule, context)
@@ -592,12 +600,41 @@ class EventEngine:
                 obj, locale, context.tracker, context.video_time
             ):
                 continue
+
+            proprietaire = obj.owner_id
             details: dict[str, object] = {
                 "deplacement_px": round(obj.displacement(locale.min_duration_s), 1),
                 "deplacement_relatif": round(obj.displacement_ratio(locale.min_duration_s), 3),
-                "proprietaire_presume": "aucun",
+                "proprietaire_presume": (
+                    f"#{proprietaire} (parti)" if proprietaire is not None else "aucun observé"
+                ),
             }
             yield RuleOutcome(obj, zone_name, obj.age, details)
+
+    def _bind_owner(
+        self, obj: TrackedObject, rule: config.EventRule, context: FrameContext
+    ) -> None:
+        """Vote pour le porteur présumé, pendant les premières secondes de l'objet.
+
+        Passé `owner_binding_s`, l'association est figée : une personne qui passe
+        devant un sac déjà posé n'en devient pas le porteur. C'est ce verrou qui
+        distingue « le propriétaire » d'« un passant ».
+
+        Args:
+            obj: Objet suivi, candidat à l'abandon.
+            rule: Règle appliquée.
+            context: Scène de la frame.
+        """
+        if not rule.requires_no_owner or obj.age > rule.owner_binding_s:
+            return
+
+        voisin = context.tracker.nearest(
+            obj,
+            class_names=rule.owner_classes,
+            radius_px=self._owner_radius(obj, rule),
+        )
+        if voisin is not None:
+            obj.bind_owner(voisin.track_id)
 
     def _after_hours_outcomes(
         self, rule: config.EventRule, context: FrameContext
@@ -692,17 +729,36 @@ class EventEngine:
     def _check_abandoned_object(
         self, obj: TrackedObject, rule: config.EventRule, tracker: Tracker, video_time: float
     ) -> bool:
-        """Teste qu'un objet est immobile depuis longtemps et sans propriétaire.
+        """Teste qu'un objet est immobile depuis longtemps et délaissé.
 
-        Trois conditions cumulées :
-        1. `obj.age >= rule.min_duration_s`
-        2. `obj.is_stationary(rule.max_movement_px, rule.min_duration_s)`
-        3. `tracker.nearest(obj, class_names=("person",), radius_px=...)` est None
+        Trois conditions cumulées : l'âge, l'immobilité, et l'absence de
+        propriétaire — cette dernière étant celle que la phase 6 a refondue.
+
+        Ce que le critère de voisinage ne savait pas dire
+        --------------------------------------------------
+        La version précédente demandait « aucune personne dans le rayon
+        **maintenant** ». Le critère est fragile dans les deux sens :
+
+        * en foule, il y a toujours quelqu'un dans le rayon — un sac réellement
+          abandonné dans un hall de gare n'est jamais signalé ;
+        * dans un lieu désert, le premier passant qui s'éloigne suffit à
+          déclencher, alors que le propriétaire est peut-être à trois mètres.
+
+        La logique relationnelle pose la bonne question : **cette personne-là**,
+        celle qui accompagnait l'objet quand il est apparu, est-elle encore dans
+        le champ ? Le `track_id` stable suffit à la suivre ; aucune dépendance
+        supplémentaire n'est nécessaire.
+
+        Repli assumé
+        -------------
+        Un objet apparu seul — un sac déjà posé au démarrage de l'analyse — n'a
+        pas de porteur observable. Le critère de voisinage instantané reste alors
+        le seul disponible, et il vaut mieux qu'aucun critère du tout.
 
         Args:
             obj: Objet suivi.
             rule: Règle appliquée.
-            tracker: Tracker, pour la recherche de propriétaire.
+            tracker: Tracker, pour retrouver le porteur ou chercher un voisin.
             video_time: Temps vidéo courant.
 
         Returns:
@@ -717,14 +773,22 @@ class EventEngine:
         ):
             return False
 
-        if rule.requires_no_owner:
-            owner = tracker.nearest(
-                obj, class_names=("person",), radius_px=self._owner_radius(obj, rule)
-            )
-            if owner is not None:
-                return False
+        if not rule.requires_no_owner:
+            return True
 
-        return True
+        proprietaire = obj.owner_id
+        if proprietaire is not None:
+            # Le porteur est connu : la seule question qui vaille est de savoir
+            # s'il est encore là. `Tracker.get()` rend `None` quand la piste a
+            # été purgée, c'est-à-dire quand la personne a quitté le champ
+            # au-delà de la tolérance d'occlusion.
+            return tracker.get(proprietaire) is None
+
+        # Repli : aucun porteur observé, on retombe sur le voisinage instantané.
+        voisin = tracker.nearest(
+            obj, class_names=rule.owner_classes, radius_px=self._owner_radius(obj, rule)
+        )
+        return voisin is None
 
     @staticmethod
     def _movement_threshold(obj: TrackedObject, rule: config.EventRule) -> float | None:

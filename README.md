@@ -547,6 +547,39 @@ mais elle supprime l'essentiel de l'erreur, **sans calibration ni homographie**,
 donc sans rien demander à l'utilisateur. Les seuils en pixels restent déclarés
 dans `config.EVENT_RULES` et servent de repli si le ratio n'est pas renseigné.
 
+### 3.5 bis Objet abandonné : une relation, pas un voisinage
+
+La règle demandait « aucune personne dans le rayon **maintenant** ». Le critère
+est fragile dans les deux sens :
+
+- **en foule**, il y a toujours quelqu'un dans le rayon — un sac réellement
+  abandonné dans un hall de gare n'est jamais signalé ;
+- **dans un lieu désert**, le premier passant qui s'éloigne suffit à déclencher,
+  alors que le propriétaire est peut-être à trois mètres.
+
+La logique relationnelle pose la bonne question : *cette personne-là*, celle qui
+accompagnait l'objet quand il est apparu, est-elle encore dans le champ ? Le
+`track_id` stable suffit à la suivre — aucune dépendance supplémentaire.
+
+**Le moment où l'on regarde.** L'association se fait pendant les premières
+secondes de vie de l'objet (`owner_binding_s`), pas au moment où la règle se
+déclenche. Quand un sac est immobile depuis trente secondes, la personne qui l'a
+posé est partie depuis longtemps : il faut avoir regardé au bon moment. Passé
+cette fenêtre, l'association est figée — une personne qui passe devant un sac
+déjà posé n'en devient pas le porteur.
+
+**On vote, on ne retient pas la première réponse.** Même mécanisme que pour la
+classe (§ 3.4) : à l'apparition d'un sac, la personne la plus proche sur une
+frame isolée peut être un passant. Les égalités sont départagées par le plus
+petit identifiant, pour que deux analyses de la même vidéo désignent le même
+porteur.
+
+**Le repli est assumé.** Un objet apparu seul — un sac déjà posé au démarrage de
+l'analyse — n'a pas de porteur observable. Le critère de voisinage instantané
+reste alors le seul disponible, et il vaut mieux qu'aucun critère du tout. Le
+rapport distingue les deux cas : « #9 (parti) » et « aucun observé » ne disent
+pas la même chose.
+
 ### 3.6 Le moteur d'événements temporel
 
 Ce n'est pas un algorithme publié, mais c'est la partie proprement « métier » du
