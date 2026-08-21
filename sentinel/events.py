@@ -3,12 +3,29 @@
 C'est le cœur métier du projet : transformer « un objet suivi se trouve dans une
 zone depuis N secondes » en « incident de sécurité qualifié ».
 
-Le moteur ne détecte rien et ne dessine rien. Il consomme des `TrackedObject`
-(mémoire temporelle) et des noms de zones (géométrie), applique les `EventRule`
-de `config.py`, et produit des `Event` immuables. Ajouter un nouveau type
-d'incident consiste à ajouter une `EventRule` dans la configuration et, si
-nécessaire, un prédicat dans ce module — jamais à toucher au détecteur ou à
-l'interface.
+Le moteur ne détecte rien. Il consomme des `TrackedObject` (mémoire temporelle)
+et des noms de zones (géométrie), applique les `EventRule` de `config.py`, et
+produit des `Event` immuables. Ajouter un nouveau type d'incident consiste à
+ajouter une `EventRule` dans la configuration et un prédicat dans ce module —
+jamais à toucher au détecteur ou à l'interface.
+
+Le contrat de prédicat : la scène, pas un objet
+------------------------------------------------
+Un prédicat reçoit un `FrameContext` — l'ensemble des objets de la frame, le
+tracker complet, les zones, les deux horloges — et rend zéro, un ou plusieurs
+`RuleOutcome`.
+
+Ce contrat n'est pas une généralisation gratuite. La forme précédente
+(`for objet: for règle:`, un objet par prédicat) interdisait **structurellement**
+toute règle qui raisonne sur une relation : attroupement, talonnage,
+franchissement, objet déposé par une personne identifiée. Le moteur détenait
+pourtant déjà l'ensemble — il reçoit le `Tracker` et possède le `ZoneManager` —
+mais aucune règle ne pouvait y accéder. Ce qui manquait était le contrat, pas
+l'accès.
+
+Le sens du flux est préservé : le contexte est construit **par** le moteur à
+partir de ce que les étages amont lui ont transmis. Les règles le lisent ; rien
+n'y écrit, et aucun prédicat ne remonte vers le détecteur ou la source.
 
 Les trois filtres anti-fausses-alertes
 --------------------------------------
@@ -30,7 +47,7 @@ import logging
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 import cv2
 import numpy as np
@@ -132,12 +149,147 @@ class Event:
         }
 
 
-class EventEngine:
-    """Applique les règles de `config.EVENT_RULES` aux objets suivis.
+@dataclass(frozen=True, slots=True)
+class RuleOutcome:
+    """Ce qu'une règle a constaté sur une frame, pour un objet donné.
 
-    Exemple d'utilisation prévue :
+    Une règle rend zéro, un ou plusieurs constats. Zéro est le cas courant ;
+    plusieurs devient possible dès qu'une règle raisonne sur un ensemble — une
+    surdensité concerne tous les objets de la zone, un franchissement de ligne
+    peut en concerner deux au même instant.
+
+    Attributes:
+        subject: Objet auquel l'incident sera imputé. Une règle collective
+            désigne quand même **un** sujet : un rapport nomme un objet, sinon
+            il n'est ni vérifiable ni illustrable par une preuve.
+        zone_name: Zone concernée, ou `None` si le constat n'en dépend pas.
+        duration_s: Durée constatée, telle qu'elle figurera au rapport.
+        details: Champs supplémentaires propres à la règle, repris dans le
+            rapport et dans le CSV.
+    """
+
+    subject: TrackedObject
+    zone_name: str | None
+    duration_s: float
+    details: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class FrameContext:
+    """Tout ce qu'une règle peut observer sur une frame.
+
+    Pourquoi ce contexte existe
+    ----------------------------
+    Le moteur bouclait `for objet: for règle:` et passait un objet unique à
+    chaque prédicat. Cette forme interdit structurellement toute règle qui
+    raisonne sur une **relation** — attroupement, talonnage, franchissement,
+    objet déposé par quelqu'un — puisque le prédicat ne voit jamais le reste de
+    la scène.
+
+    Le moteur possédait pourtant déjà l'ensemble : il reçoit le `Tracker`
+    complet et détient le `ZoneManager`. Ce qui manquait n'était pas l'accès
+    mais le **contrat** : le rendre explicite débloque les règles relationnelles
+    sans rien changer aux quatre règles existantes.
+
+    Le sens du flux est préservé : le contexte est construit **par** le moteur à
+    partir de ce que les étages amont lui ont donné, et les règles le lisent.
+    Rien n'y écrit.
+
+    Attributes:
+        objects: Objets confirmés vus sur cette frame, triés par `track_id`.
+        tracker: Mémoire temporelle complète, y compris les objets non vus sur
+            cette frame mais toujours retenus.
+        zones: Géométrie des zones surveillées.
+        video_time: Temps métier de la frame — celui qui pilote les décisions.
+        wall_time: Horodatage réel — pour dater et pour la règle hors horaires.
+        frame: Image courante, pour la capture de preuve. `None` en test.
+    """
+
+    objects: tuple[TrackedObject, ...]
+    tracker: Tracker
+    zones: object
+    video_time: float
+    wall_time: datetime
+    frame: "np.ndarray | None" = None
+
+    def candidates(self, rule: config.EventRule) -> tuple[TrackedObject, ...]:
+        """Objets qu'une règle peut effectivement mettre en cause.
+
+        Applique les deux filtres qui ne dépendent pas du contenu de la scène :
+        la classe visée par la règle, et le délai de garde. Les appliquer **ici**
+        plutôt que dans chaque prédicat évite de recalculer une condition dont on
+        sait déjà que le résultat ne pourra pas être publié.
+
+        Une règle collective lit `objects` pour compter et `candidates()` pour
+        désigner : sept personnes peuvent constituer une surdensité alors que
+        six d'entre elles sont sous délai de garde.
+
+        Args:
+            rule: Règle appliquée.
+
+        Returns:
+            Les objets éligibles, dans l'ordre de `objects`.
+        """
+        return tuple(
+            obj
+            for obj in self.objects
+            if (not rule.classes or obj.class_name in rule.classes)
+            and obj.can_raise(rule.event_type.value, self.video_time, rule.cooldown_s)
+        )
+
+    def of_class(self, *class_names: str) -> tuple[TrackedObject, ...]:
+        """Objets de la frame appartenant à l'une des classes citées.
+
+        Args:
+            *class_names: Classes recherchées.
+
+        Returns:
+            Les objets correspondants, dans l'ordre de `objects`.
+        """
+        vises = set(class_names)
+        return tuple(obj for obj in self.objects if obj.class_name in vises)
+
+    def in_zone(self, zone_name: str) -> tuple[TrackedObject, ...]:
+        """Objets de la frame occupant une zone donnée.
+
+        Args:
+            zone_name: Nom de la zone.
+
+        Returns:
+            Les objets qui l'occupent, dans l'ordre de `objects`.
+        """
+        return tuple(obj for obj in self.objects if zone_name in obj.zones)
+
+    @property
+    def zone_names(self) -> tuple[str, ...]:
+        """Noms de toutes les zones surveillées."""
+        return tuple(getattr(self.zones, "names", ()) or ())
+
+
+class EventEngine:
+    """Applique les règles de `config.EVENT_RULES` à la scène d'une frame.
+
         >>> engine = EventEngine(zone_manager)
         >>> events = engine.evaluate(tracked_objects, tracker, frame, video_time)
+
+    Ajouter une règle relationnelle
+    -------------------------------
+    Écrire un prédicat qui lit le contexte, l'enregistrer dans `_PREDICATES`,
+    et déclarer l'`EventRule` correspondante dans `config.py` :
+
+        def _crowding_outcomes(self, rule, context):
+            for zone in context.zone_names:
+                presents = context.in_zone(zone)
+                if len(presents) < rule.min_occupancy:
+                    continue
+                for obj in context.candidates(rule):
+                    if zone in obj.zones:
+                        yield RuleOutcome(obj, zone, obj.dwell_time(zone, context.video_time))
+
+    Noter la distinction entre `context.in_zone()` — qui **compte**, tous objets
+    confondus — et `context.candidates()` — qui **désigne**, en écartant les
+    objets sous délai de garde. Sept personnes peuvent constituer une surdensité
+    alors que six d'entre elles viennent déjà d'être signalées.
     """
 
     def __init__(
@@ -172,12 +324,24 @@ class EventEngine:
         video_time: float,
         wall_time: datetime | None = None,
     ) -> list[Event]:
-        """Évalue toutes les règles sur tous les objets d'une frame.
+        """Évalue toutes les règles sur l'ensemble des objets d'une frame.
+
+        Les règles reçoivent la scène entière via un `FrameContext`, et non un
+        objet isolé. Les quatre règles actuelles n'en regardent qu'un chacune —
+        leur comportement est inchangé — mais le contrat autorise désormais les
+        règles relationnelles : attroupement, talonnage, franchissement, objet
+        déposé par une personne identifiée.
+
+        **L'ordre d'émission reste (objet, règle).** Les identifiants d'incident
+        sont attribués séquentiellement : émettre dans l'ordre des règles ferait
+        changer `SR-0001` et `SR-0002` de place sur la même vidéo, et le rapport
+        cesserait d'être reproductible.
 
         Args:
-            tracked_objects: Objets confirmés vus sur la frame.
-            tracker: Tracker complet (nécessaire pour chercher un propriétaire
-                présumé à proximité d'un objet).
+            tracked_objects: Objets confirmés vus sur la frame, triés par
+                `track_id`.
+            tracker: Tracker complet — une règle peut avoir besoin d'un objet
+                retenu mais non vu sur cette frame.
             frame: Frame courante, pour la capture de preuve.
             video_time: Temps vidéo de la frame.
             wall_time: Horodatage réel. `None` = maintenant.
@@ -186,107 +350,87 @@ class EventEngine:
             Les événements déclenchés sur cette frame (souvent vide).
         """
         moment = wall_time or datetime.now()
+        context = FrameContext(
+            objects=tuple(tracked_objects),
+            tracker=tracker,
+            zones=self._zones,
+            video_time=video_time,
+            wall_time=moment,
+            frame=frame,
+        )
+
+        rang_objet = {obj.track_id: rang for rang, obj in enumerate(context.objects)}
+        constats: list[tuple[int, int, config.EventRule, RuleOutcome]] = []
+
+        for rang_regle, rule in enumerate(self._rules):
+            for outcome in self._outcomes_for(rule, context):
+                constats.append(
+                    (
+                        rang_objet.get(outcome.subject.track_id, len(rang_objet)),
+                        rang_regle,
+                        rule,
+                        outcome,
+                    )
+                )
+
+        constats.sort(key=lambda constat: (constat[0], constat[1]))
+
         raised: list[Event] = []
+        for _, _, rule, outcome in constats:
+            obj = outcome.subject
+            # Second contrôle du délai de garde : `candidates()` l'a déjà
+            # appliqué en amont, mais une règle collective peut désigner un sujet
+            # qu'elle a tiré de `objects` plutôt que de `candidates()`. Le point
+            # de publication est le seul endroit où ce contrôle est sûr.
+            if not obj.can_raise(rule.event_type.value, video_time, rule.cooldown_s):
+                continue
 
-        for obj in tracked_objects:
-            for rule in self._rules:
-                # 1. La règle concerne-t-elle cette classe d'objet ?
-                if rule.classes and obj.class_name not in rule.classes:
-                    continue
+            event = self._build_event(
+                obj,
+                rule,
+                wall_time=moment,
+                video_time=video_time,
+                zone_name=outcome.zone_name,
+                duration_s=outcome.duration_s,
+                details=outcome.details,
+            )
+            event = self._attach_evidence(event, frame, obj)
 
-                # 2. Le délai de garde est-il écoulé ? Ce test vient AVANT le
-                #    prédicat : inutile de recalculer une condition dont on sait
-                #    déjà que le résultat ne pourra pas être publié.
-                if not obj.can_raise(rule.event_type.value, video_time, rule.cooldown_s):
-                    continue
+            obj.mark_event(rule.event_type.value, video_time)
+            self._history.append(event)
+            raised.append(event)
 
-                # 3. La condition métier est-elle remplie ?
-                outcome = self._check_rule(obj, rule, tracker, video_time, moment)
-                if outcome is None:
-                    continue
-
-                zone_name, duration_s, details = outcome
-                event = self._build_event(
-                    obj,
-                    rule,
-                    wall_time=moment,
-                    video_time=video_time,
-                    zone_name=zone_name,
-                    duration_s=duration_s,
-                    details=details,
-                )
-                event = self._attach_evidence(event, frame, obj)
-
-                obj.mark_event(rule.event_type.value, video_time)
-                self._history.append(event)
-                raised.append(event)
-
-                logger.info(
-                    "Incident %s : %s (objet #%s, zone %s, %.0fs)",
-                    event.event_id,
-                    event.event_type.value,
-                    event.track_id,
-                    event.zone_name or "-",
-                    event.duration_s,
-                )
+            logger.info(
+                "Incident %s : %s (objet #%s, zone %s, %.0fs)",
+                event.event_id,
+                event.event_type.value,
+                event.track_id,
+                event.zone_name or "-",
+                event.duration_s,
+            )
 
         return raised
 
-    def _check_rule(
-        self,
-        obj: TrackedObject,
-        rule: config.EventRule,
-        tracker: Tracker,
-        video_time: float,
-        wall_time: datetime,
-    ) -> tuple[str | None, float, dict[str, object]] | None:
+    def _outcomes_for(
+        self, rule: config.EventRule, context: FrameContext
+    ) -> Iterator[RuleOutcome]:
         """Aiguille vers le prédicat correspondant au type de la règle.
 
         Args:
-            obj: Objet suivi.
             rule: Règle appliquée.
-            tracker: Tracker complet.
-            video_time: Temps vidéo courant.
-            wall_time: Horodatage réel.
+            context: Scène complète de la frame.
 
-        Returns:
-            Le triplet `(zone, durée, détails)` si la règle se déclenche, sinon
-            `None`.
+        Yields:
+            Les constats de la règle, éventuellement aucun.
         """
-        event_type = rule.event_type
-
-        if event_type is config.EventType.INTRUSION:
-            zone = self._check_intrusion(obj, rule, video_time)
-            if zone is None:
-                return None
-            return zone, obj.dwell_time(zone, video_time), {}
-
-        if event_type is config.EventType.LOITERING:
-            zone = self._check_loitering(obj, rule, video_time)
-            if zone is None:
-                return None
-            return zone, obj.dwell_time(zone, video_time), {}
-
-        if event_type is config.EventType.ABANDONED_OBJECT:
-            if not self._check_abandoned_object(obj, rule, tracker, video_time):
-                return None
-            details: dict[str, object] = {
-                "deplacement_px": round(obj.displacement(rule.min_duration_s), 1),
-                "deplacement_relatif": round(obj.displacement_ratio(rule.min_duration_s), 3),
-                "proprietaire_presume": "aucun",
-            }
-            return self._primary_zone(obj), obj.age, details
-
-        if event_type is config.EventType.AFTER_HOURS:
-            if not self._check_after_hours(obj, rule, wall_time):
-                return None
-            return self._primary_zone(obj), obj.age, {"heure_locale": wall_time.strftime("%H:%M")}
-
-        # Une règle d'un type non géré est ignorée, jamais fatale : ajouter un
-        # EventType dans config.py sans son prédicat ne doit pas arrêter
-        # l'analyse en cours.
-        logger.warning("Type de règle non pris en charge, ignoré : %s", event_type)
-        return None
+        predicat = self._PREDICATES.get(rule.event_type)
+        if predicat is None:
+            # Une règle d'un type non géré est ignorée, jamais fatale : ajouter
+            # un EventType dans config.py sans son prédicat ne doit pas arrêter
+            # l'analyse en cours.
+            logger.warning("Type de règle non pris en charge, ignoré : %s", rule.event_type)
+            return
+        yield from predicat(self, rule, context)
 
     @staticmethod
     def _primary_zone(obj: TrackedObject) -> str | None:
@@ -301,6 +445,60 @@ class EventEngine:
         return sorted(obj.zones)[0] if obj.zones else None
 
     # -- Prédicats par type d'incident ---------------------------------------
+
+    # -- Prédicats : de la scène aux constats ---------------------------------
+    #
+    # Chaque prédicat reçoit la scène entière et rend zéro, un ou plusieurs
+    # constats. Les quatre règles actuelles se contentent de parcourir les
+    # objets éligibles — leur logique est inchangée — mais elles ont désormais
+    # accès aux autres objets et aux zones, ce qu'exigera toute règle
+    # relationnelle.
+
+    def _intrusion_outcomes(
+        self, rule: config.EventRule, context: FrameContext
+    ) -> Iterator[RuleOutcome]:
+        """Constats d'intrusion : présence prolongée en zone restreinte."""
+        for obj in context.candidates(rule):
+            zone = self._check_intrusion(obj, rule, context.video_time)
+            if zone is not None:
+                yield RuleOutcome(obj, zone, obj.dwell_time(zone, context.video_time))
+
+    def _loitering_outcomes(
+        self, rule: config.EventRule, context: FrameContext
+    ) -> Iterator[RuleOutcome]:
+        """Constats de rôdage : présence anormalement longue, zone restreinte ou non."""
+        for obj in context.candidates(rule):
+            zone = self._check_loitering(obj, rule, context.video_time)
+            if zone is not None:
+                yield RuleOutcome(obj, zone, obj.dwell_time(zone, context.video_time))
+
+    def _abandoned_outcomes(
+        self, rule: config.EventRule, context: FrameContext
+    ) -> Iterator[RuleOutcome]:
+        """Constats d'objet abandonné : immobile, ancien, et sans propriétaire proche."""
+        for obj in context.candidates(rule):
+            if not self._check_abandoned_object(obj, rule, context.tracker, context.video_time):
+                continue
+            details: dict[str, object] = {
+                "deplacement_px": round(obj.displacement(rule.min_duration_s), 1),
+                "deplacement_relatif": round(obj.displacement_ratio(rule.min_duration_s), 3),
+                "proprietaire_presume": "aucun",
+            }
+            yield RuleOutcome(obj, self._primary_zone(obj), obj.age, details)
+
+    def _after_hours_outcomes(
+        self, rule: config.EventRule, context: FrameContext
+    ) -> Iterator[RuleOutcome]:
+        """Constats hors horaires : c'est l'heure murale qui décide, pas le temps vidéo."""
+        for obj in context.candidates(rule):
+            if not self._check_after_hours(obj, rule, context.wall_time):
+                continue
+            yield RuleOutcome(
+                obj,
+                self._primary_zone(obj),
+                obj.age,
+                {"heure_locale": context.wall_time.strftime("%H:%M")},
+            )
 
     def _check_intrusion(
         self, obj: TrackedObject, rule: config.EventRule, video_time: float
@@ -731,6 +929,17 @@ class EventEngine:
             max(0, y1 - margin_px) : min(height, y2 + margin_px),
             max(0, x1 - margin_px) : min(width, x2 + margin_px),
         ]
+
+    # Table d'aiguillage type d'incident -> prédicat. Une table plutôt qu'une
+    # cascade de `if` : ajouter une règle consiste à ajouter une entrée, et un
+    # type sans prédicat est détecté par une simple absence de clé — pas par une
+    # branche `else` qu'on oublie de mettre à jour.
+    _PREDICATES: dict[config.EventType, object] = {
+        config.EventType.INTRUSION: _intrusion_outcomes,
+        config.EventType.LOITERING: _loitering_outcomes,
+        config.EventType.ABANDONED_OBJECT: _abandoned_outcomes,
+        config.EventType.AFTER_HOURS: _after_hours_outcomes,
+    }
 
     # -- Consultation ----------------------------------------------------------
 
