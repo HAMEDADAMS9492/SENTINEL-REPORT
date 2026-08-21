@@ -28,8 +28,9 @@ import streamlit as st
 import config
 from sentinel.detector import Detector
 from sentinel.events import Event, EventEngine
-from sentinel.exceptions import ModelLoadError, SentinelError, VideoSourceError
+from sentinel.exceptions import ModelLoadError, SentinelError, SourceDisconnectedError
 from sentinel.report import ReportGenerator
+from sentinel.source import VideoSource, detect_kind
 from sentinel.tracker import Tracker
 from sentinel.zones import ZoneManager
 
@@ -745,9 +746,12 @@ def _render_class_picker() -> list[str]:
 
 
 def resolve_source(settings: dict[str, object]) -> str | int | None:
-    """Détermine la source à ouvrir avec OpenCV.
+    """Désigne la source choisie par l'opérateur.
 
-    Un fichier téléversé vit en mémoire ; `cv2.VideoCapture` exige un chemin sur
+    Rend une **désignation**, pas une source ouverte : la nature du flux et sa
+    gestion appartiennent à `sentinel.source`, pas à l'interface.
+
+    Un fichier téléversé vit en mémoire ; toute capture vidéo exige un chemin sur
     disque. On l'écrit donc dans un fichier temporaire, conservé dans la session
     pour ne pas le réécrire à chaque rerun.
 
@@ -826,12 +830,31 @@ def annotate(frame, zone_manager: ZoneManager, objects, settings: dict[str, obje
     return canvas
 
 
-def process_video(source, settings: dict[str, object], pipeline) -> None:
-    """Boucle principale : lit la vidéo, exécute le pipeline, affiche en direct.
+def open_source(target: str | int, settings: dict[str, object]) -> VideoSource:
+    """Construit la source d'images correspondant au choix de l'opérateur.
+
+    L'interface ne connaît que deux choses : une désignation (chemin ou index) et
+    l'intention de l'opérateur. `detect_kind()` fait le reste — c'est le module
+    `source.py` qui sait qu'un entier est une webcam et qu'un `://` est un flux
+    réseau, pas `app.py`.
+
+    Args:
+        target: Chemin de fichier, index de webcam ou URL de flux.
+        settings: Réglages de la session.
+
+    Returns:
+        La source, **non encore ouverte** : l'ouverture appartient au bloc
+        `with` de `process_video`, qui garantit sa libération.
+    """
+    return VideoSource(target, kind=detect_kind(target))
+
+
+def process_video(source: VideoSource, settings: dict[str, object], pipeline) -> None:
+    """Boucle principale : lit la source, exécute le pipeline, affiche en direct.
 
     C'est ici que le flux de données prend forme, une frame à la fois :
 
-        frame
+        VideoSource.frames()       : image + les deux horodatages
           -> Detector.track()      : boîtes + classes + track_id
           -> Tracker.update()      : mémoire temporelle par objet
           -> ZoneManager.zones_for : zones occupées par chaque objet
@@ -839,30 +862,26 @@ def process_video(source, settings: dict[str, object], pipeline) -> None:
           -> EventEngine.evaluate(): règles zone + durée + type -> Event
           -> ReportGenerator       : Event -> rapport
 
+    **Pourquoi `VideoSource` et non `cv2.VideoCapture` directement.** Une capture
+    brute ne sait ni se rouvrir après une coupure réseau, ni écarter les images
+    accumulées pendant le traitement, ni surtout dire l'heure : sur un direct,
+    `frame_index / fps` sous-estime toutes les durées dès qu'une image est
+    sautée, et aucune règle temporelle n'est alors fiable. `Frame` porte le temps
+    métier déjà calculé — reconstruit sur un fichier, observé à l'horloge en
+    direct. L'interface n'a plus à en décider.
+
     Args:
-        source: Chemin du fichier vidéo ou index de webcam.
+        source: Source d'images, non encore ouverte.
         settings: Réglages issus de `render_sidebar()`.
         pipeline: Composants retournés par `build_pipeline()`.
 
     Raises:
-        VideoSourceError: Si la source ne peut pas être ouverte ou lue.
+        VideoSourceError: Si la source ne peut pas être ouverte.
     """
     _, tracker, zone_manager, event_engine, _ = pipeline
 
-    capture = cv2.VideoCapture(source)
-    if not capture.isOpened():
-        raise VideoSourceError(
-            f"Source vidéo illisible : {source}. Vérifiez le fichier ou la webcam."
-        )
-
-    fps = capture.get(cv2.CAP_PROP_FPS)
-    if not fps or fps <= 1.0 or fps > 240.0:
-        logger.warning("FPS invalide (%s) ; repli sur %.1f.", fps, config.VIDEO.default_fps)
-        fps = config.VIDEO.default_fps
-
-    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     stride = max(1, int(settings["frame_stride"]))
-    max_frames = int(float(settings["max_seconds"]) * fps)
+    max_seconds = float(settings["max_seconds"])
 
     with st.container(border=True):
         st.markdown('<p class="sr-section">Analyse en cours</p>', unsafe_allow_html=True)
@@ -870,64 +889,123 @@ def process_video(source, settings: dict[str, object], pipeline) -> None:
         status_slot = st.empty()
         progress = st.progress(0.0)
 
-    frame_index = 0
     processed = 0
+    lues = 0
+    ecartees = 0
 
     try:
-        while True:
-            ok, frame = capture.read()
-            if not ok:
-                break
+        # Le gestionnaire de contexte garantit la libération de la capture :
+        # sans elle, un fichier reste verrouillé sous Windows et une webcam
+        # reste allumée jusqu'à l'arrêt du processus.
+        with source:
+            for frame in source.frames(max_seconds=max_seconds):
+                lues += 1
+                ecartees += frame.dropped
 
-            if frame_index % stride:
-                frame_index += 1
-                continue
+                if frame.index % stride:
+                    continue
 
-            if config.VIDEO.max_width and frame.shape[1] > config.VIDEO.max_width:
-                scale = config.VIDEO.max_width / frame.shape[1]
-                frame = cv2.resize(frame, None, fx=scale, fy=scale)
+                image = frame.image
+                if config.VIDEO.max_width and image.shape[1] > config.VIDEO.max_width:
+                    scale = config.VIDEO.max_width / image.shape[1]
+                    image = cv2.resize(image, None, fx=scale, fy=scale)
 
-            if not zone_manager.is_initialized:
-                zone_manager.initialize(frame.shape)
+                if not zone_manager.is_initialized:
+                    zone_manager.initialize(image.shape)
 
-            objects = tracker.update(frame, frame_index=frame_index, fps=fps)
-
-            for obj in objects:
-                obj.update_zones(zone_manager.zones_for(obj.detection), tracker.video_time)
-
-            events = event_engine.evaluate(objects, tracker, frame, tracker.video_time)
-            if events:
-                st.session_state["events"].extend(events)
-
-            image_slot.image(
-                annotate(frame, zone_manager, objects, settings),
-                channels="BGR",
-                **stretch(),
-            )
-            status_slot.markdown(
-                f"**t = {tracker.video_time:.1f} s** · objets suivis : "
-                f"{len(objects)} · incidents : {len(st.session_state['events'])} · "
-                f"{tracker.counts() or '—'}"
-            )
-
-            if total_frames:
-                progress.progress(min(1.0, frame_index / total_frames))
-
-            frame_index += 1
-            processed += 1
-            if frame_index >= max_frames:
-                status_slot.info(
-                    f"Durée maximale atteinte ({settings['max_seconds']} s de vidéo). "
-                    "Augmentez la limite dans la barre latérale pour aller plus loin."
+                # `video_time` est **imposé** par la source : c'est le seul moyen
+                # de rester juste en direct, où le compteur d'images ne mesure
+                # plus le temps écoulé.
+                objects = tracker.update(
+                    image,
+                    frame_index=frame.index,
+                    fps=source.fps,
+                    wall_time=frame.wall_time,
+                    video_time=frame.video_time,
                 )
-                break
+
+                for obj in objects:
+                    obj.update_zones(zone_manager.zones_for(obj.detection), tracker.video_time)
+
+                events = event_engine.evaluate(
+                    objects, tracker, image, tracker.video_time, frame.wall_time
+                )
+                if events:
+                    st.session_state["events"].extend(events)
+
+                image_slot.image(
+                    annotate(image, zone_manager, objects, settings),
+                    channels="BGR",
+                    **stretch(),
+                )
+                status_slot.markdown(
+                    _status_line(
+                        source, tracker, ecartees, len(st.session_state["events"])
+                    )
+                )
+
+                # Un direct n'a pas d'avancement, seulement une durée : la barre
+                # suit alors la fraction de durée maximale déjà écoulée.
+                avancement = source.progress()
+                if avancement is None:
+                    avancement = min(1.0, frame.video_time / max_seconds) if max_seconds else 0.0
+                progress.progress(avancement)
+
+                processed += 1
+    except SourceDisconnectedError as exc:
+        # Un flux perdu en cours de route n'annule pas l'analyse déjà produite :
+        # les incidents relevés restent exploitables, seule la suite manque.
+        st.warning(f"{exc} L'analyse effectuée jusque-là reste exploitable.", icon="⚠")
     finally:
-        # Libération garantie : sans elle, un fichier vidéo reste verrouillé sous
-        # Windows et une webcam reste allumée jusqu'à l'arrêt du processus.
-        capture.release()
         progress.empty()
 
-    logger.info("Analyse terminée : %d frames traitées sur %d lues.", processed, frame_index)
+    if ecartees:
+        st.caption(
+            f"{ecartees} image(s) écartée(s) pour suivre le direct : le traitement "
+            "est plus lent que la caméra. Augmentez « Analyser une frame sur » "
+            "ou choisissez un modèle plus rapide."
+        )
+
+    logger.info(
+        "Analyse terminée : %d frames traitées sur %d lues (%d écartées).",
+        processed,
+        lues,
+        ecartees,
+    )
+
+
+def _status_line(
+    source: VideoSource, tracker: Tracker, dropped: int, incidents: int
+) -> str:
+    """Ligne d'état affichée sous la vidéo pendant l'analyse.
+
+    Le compte d'incidents est **passé en argument** plutôt que relu dans
+    `st.session_state` : une fonction de mise en forme qui va chercher son état
+    dans une variable globale n'est testable qu'en simulant tout Streamlit.
+
+    Nommer l'horloge n'est pas décoratif. Sur un fichier, `t` est reconstruit
+    depuis le numéro d'image et l'analyse est reproductible ; en direct, `t` est
+    l'heure écoulée. L'opérateur doit savoir laquelle il lit avant de recopier
+    une durée dans un rapport.
+
+    Args:
+        source: Source en cours de lecture.
+        tracker: Tracker, pour le temps vidéo et les comptages.
+        dropped: Nombre cumulé d'images écartées.
+        incidents: Nombre d'incidents relevés depuis le début de la session.
+
+    Returns:
+        Le texte Markdown de la ligne d'état.
+    """
+    horloge = "temps réel" if source.is_live else "temps vidéo"
+    ligne = (
+        f"**t = {tracker.video_time:.1f} s** ({horloge}) · objets suivis : "
+        f"{len(tracker.active())} · incidents : {incidents} · "
+        f"{tracker.counts() or '—'}"
+    )
+    if dropped:
+        ligne += f" · {dropped} image(s) écartée(s)"
+    return ligne
 
 
 # ---------------------------------------------------------------------------
@@ -1219,7 +1297,7 @@ def main() -> None:
             try:
                 pipeline = build_pipeline(str(settings["weights"]), settings)
                 st.session_state["events"] = []
-                process_video(source, settings, pipeline)
+                process_video(open_source(source, settings), settings, pipeline)
                 st.session_state["generator"] = pipeline[4]
                 events = st.session_state["events"]
                 st.success(
