@@ -11,7 +11,7 @@ runtime, ce qui évite qu'un module la modifie par effet de bord.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import time
 from enum import Enum
 from pathlib import Path
@@ -371,6 +371,41 @@ class Severity(str, Enum):
     MEDIUM = "moyenne"
     HIGH = "elevee"
 
+    @property
+    def rank(self) -> int:
+        """Rang de gravité croissant, de 0 (faible) à 2 (élevée).
+
+        L'ordre des membres d'une énumération n'est pas un ordre métier : rien
+        n'empêche d'insérer un niveau au milieu. Le rendre explicite évite qu'un
+        comparateur ne s'appuie sur l'ordre de déclaration, et surtout que
+        l'interface ne le réimplémente de son côté par une liste ordonnée en dur.
+
+        Returns:
+            Le rang, comparable entre niveaux.
+        """
+        return _SEVERITY_RANKS[self]
+
+
+_SEVERITY_RANKS: Final[dict[Severity, int]] = {
+    Severity.LOW: 0,
+    Severity.MEDIUM: 1,
+    Severity.HIGH: 2,
+}
+
+
+def worst_severity(severities: Sequence[Severity]) -> Severity | None:
+    """Gravité la plus élevée d'un ensemble.
+
+    Args:
+        severities: Gravités à comparer, éventuellement vide.
+
+    Returns:
+        La plus élevée, ou `None` si l'ensemble est vide — un ensemble vide n'a
+        pas de pire élément, et rendre `LOW` par défaut ferait croire à un
+        incident bénin là où il n'y en a aucun.
+    """
+    return max(severities, key=lambda niveau: niveau.rank, default=None)
+
 
 @dataclass(frozen=True)
 class EventRule:
@@ -417,6 +452,51 @@ class EventRule:
     requires_no_owner: bool = False
     owner_radius_px: float = 150.0
     owner_radius_ratio: float | None = None
+
+
+def scaled_rules(
+    factor: float, rules: Sequence[EventRule] | None = None
+) -> tuple[EventRule, ...]:
+    """Applique un facteur aux durées de déclenchement **et** aux délais de garde.
+
+    Multiplier les deux ensemble n'est pas un détail d'implémentation, c'est la
+    règle elle-même : ne toucher qu'au seuil casserait l'invariant
+    `cooldown_s > min_duration_s`. À facteur 3, le rôdage passerait à 180 s de
+    seuil pour 180 s de garde, et un même objet redéclencherait en boucle — le
+    système produirait un rapport par frame, ce que les trois filtres
+    anti-fausses-alertes existent précisément pour empêcher.
+
+    Cette fonction vit dans `config.py` et non dans l'interface : c'est une
+    transformation de règle métier, pas un affichage. Un futur script batch doit
+    pouvoir l'appliquer sans importer Streamlit.
+
+    Args:
+        factor: Multiplicateur, strictement positif. 1.0 = configuration
+            d'origine, rendue telle quelle.
+        rules: Règles à ajuster. `None` = `EVENT_RULES`.
+
+    Returns:
+        Les règles ajustées. `EVENT_RULES` reste intact.
+
+    Raises:
+        ValueError: Si le facteur n'est pas strictement positif — un facteur nul
+            rendrait tout déclenchable en permanence.
+    """
+    if factor <= 0.0:
+        raise ValueError(f"Facteur de durées invalide : {factor}. Il doit être > 0.")
+
+    base = tuple(rules) if rules is not None else EVENT_RULES
+    if factor == 1.0:
+        return base
+
+    return tuple(
+        replace(
+            rule,
+            min_duration_s=rule.min_duration_s * factor,
+            cooldown_s=rule.cooldown_s * factor,
+        )
+        for rule in base
+    )
 
 
 EVENT_RULES: Final[tuple[EventRule, ...]] = (
@@ -744,6 +824,12 @@ class VideoConfig:
         max_width: Redimensionnement de la frame avant inférence.
         webcam_index: Index de la webcam pour `cv2.VideoCapture`.
         allowed_extensions: Extensions acceptées à l'upload.
+        min_fps: Cadence minimale crédible annoncée par une source. En dessous,
+            la valeur est jugée fantaisiste et `default_fps` prend le relais.
+            Une webcam qui annonce 0 fps donnerait une division par zéro ; un
+            conteneur mal muxé qui annonce 0.04 fps rendrait toutes les durées
+            absurdes.
+        max_fps: Cadence maximale crédible. Certains flux annoncent 1000 fps.
     """
 
     frame_stride: int = 1
@@ -751,6 +837,21 @@ class VideoConfig:
     max_width: int = 1280
     webcam_index: int = 0
     allowed_extensions: tuple[str, ...] = (".mp4", ".avi", ".mov", ".mkv")
+    min_fps: float = 1.0
+    max_fps: float = 240.0
+
+    def credible_fps(self, announced: float | None) -> float:
+        """Cadence retenue pour une source, après contrôle de vraisemblance.
+
+        Args:
+            announced: Cadence annoncée par la source, éventuellement absente.
+
+        Returns:
+            La cadence annoncée si elle est crédible, sinon `default_fps`.
+        """
+        if announced is None:
+            return self.default_fps
+        return announced if self.min_fps <= announced <= self.max_fps else self.default_fps
 
 
 VIDEO: Final[VideoConfig] = VideoConfig()
@@ -895,6 +996,12 @@ class UIConfig:
         show_track_id: Afficher l'ID de suivi sur les boîtes.
         box_thickness: Épaisseur des annotations.
         zone_opacity: Opacité du remplissage des zones [0-1].
+        box_color: Couleur BGR d'une boîte sans anomalie. La couleur d'une boîte
+            **en infraction** n'est pas ici : elle vient de la zone concernée
+            (`ZoneConfig.color`), pour qu'une zone rouge et une zone orange se
+            distinguent aussi sur les objets qu'elles signalent.
+        label_scale: Facteur d'échelle du texte des étiquettes (`cv2.putText`).
+        label_offset_px: Décalage vertical de l'étiquette au-dessus de la boîte.
     """
 
     page_title: str = "SentinelReport"
@@ -904,6 +1011,9 @@ class UIConfig:
     show_track_id: bool = True
     box_thickness: int = 2
     zone_opacity: float = 0.25
+    box_color: tuple[int, int, int] = (0, 200, 0)
+    label_scale: float = 0.5
+    label_offset_px: int = 6
 
 
 UI: Final[UIConfig] = UIConfig()

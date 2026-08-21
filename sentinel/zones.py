@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import unicodedata
-from typing import Sequence
+from typing import Iterable, Sequence
 
 import cv2
 import numpy as np
@@ -250,6 +250,45 @@ class ZoneManager:
     def restricted_zone_names(self) -> list[str]:
         """Noms des zones marquées `restricted=True` dans la configuration."""
         return [zone.name for zone in self._zones if zone.restricted]
+
+    def color_for(self, name: str) -> tuple[int, int, int] | None:
+        """Couleur BGR déclarée par une zone.
+
+        Exposée pour que l'interface signale un objet en infraction avec la
+        couleur de **sa** zone plutôt qu'avec un rouge codé en dur : deux zones
+        de gravités différentes restent alors distinguables sur la vidéo
+        annotée.
+
+        Args:
+            name: Nom de la zone.
+
+        Returns:
+            La couleur, ou `None` si la zone est inconnue.
+        """
+        for zone in self._zones:
+            if zone.name == name:
+                return zone.color
+        return None
+
+    def alert_color_for(self, zone_names: Iterable[str]) -> tuple[int, int, int] | None:
+        """Couleur d'alerte d'un objet occupant plusieurs zones.
+
+        Le tri alphabétique rend le choix reproductible : sans lui, l'ordre
+        d'itération d'un `set` ferait changer la couleur d'une exécution à
+        l'autre, ce qu'un opérateur interpréterait comme un changement de
+        situation.
+
+        Args:
+            zone_names: Zones occupées par l'objet.
+
+        Returns:
+            La couleur de la première zone restreinte occupée, ou `None` si
+            l'objet n'en occupe aucune.
+        """
+        restreintes = set(self.restricted_zone_names())
+        for nom in sorted(set(zone_names) & restreintes):
+            return self.color_for(nom)
+        return None
 
     def draw(self, frame: np.ndarray) -> np.ndarray:
         """Dessine les zones sur une copie de la frame.

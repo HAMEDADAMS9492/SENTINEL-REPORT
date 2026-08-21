@@ -361,13 +361,13 @@ def build_pipeline(
 
 
 def scaled_rules(settings: dict[str, object]) -> tuple[config.EventRule, ...]:
-    """Applique le curseur de durées aux règles de la configuration.
+    """Règles ajustées au curseur de durées de la barre latérale.
 
-    Le facteur multiplie **à la fois** le seuil de déclenchement et le délai de
-    garde. Ne toucher qu'au premier casserait l'invariant `cooldown_s >
-    min_duration_s` : à facteur 3, la règle de rôdage passerait à 180 s de seuil
-    pour 180 s de garde, et un même objet pourrait redéclencher en boucle.
-    Multiplier les deux préserve le rapport entre elles.
+    Simple adaptateur : il lit le réglage de l'interface et délègue le calcul à
+    `config.scaled_rules()`. La règle — multiplier seuil **et** délai de garde
+    ensemble pour préserver l'invariant `cooldown_s > min_duration_s` — est une
+    décision métier ; elle vit dans la configuration, où un script batch peut
+    l'appliquer sans importer Streamlit.
 
     Args:
         settings: Réglages issus de la barre latérale.
@@ -375,18 +375,7 @@ def scaled_rules(settings: dict[str, object]) -> tuple[config.EventRule, ...]:
     Returns:
         Les règles ajustées, laissant `config.EVENT_RULES` intact.
     """
-    factor = float(settings.get("min_duration_factor", 1.0))
-    if factor == 1.0:
-        return config.EVENT_RULES
-
-    return tuple(
-        replace(
-            rule,
-            min_duration_s=rule.min_duration_s * factor,
-            cooldown_s=rule.cooldown_s * factor,
-        )
-        for rule in config.EVENT_RULES
-    )
+    return config.scaled_rules(float(settings.get("min_duration_factor", 1.0)))
 
 
 # ---------------------------------------------------------------------------
@@ -594,12 +583,12 @@ def render_status_strip(events: list[Event]) -> None:
     Args:
         events: Incidents accumulés depuis le début de la session.
     """
-    severities = [event.severity for event in events]
-    pire = "—"
-    for niveau in (config.Severity.HIGH, config.Severity.MEDIUM, config.Severity.LOW):
-        if niveau in severities:
-            pire = niveau.value.capitalize()
-            break
+    # L'ordre des gravités est une donnée métier : `config.worst_severity()`
+    # en est l'unique dépositaire. Le réimplémenter ici par une liste ordonnée
+    # en dur aurait créé un second classement, à mettre à jour deux fois le jour
+    # où un niveau s'ajoute.
+    pire_niveau = config.worst_severity([event.severity for event in events])
+    pire = pire_niveau.value.capitalize() if pire_niveau else "—"
 
     critiques = sum(
         1
@@ -806,10 +795,10 @@ def annotate(frame, zone_manager: ZoneManager, objects, settings: dict[str, obje
 
     for obj in objects:
         x1, y1, x2, y2 = obj.detection.as_int_box()
-        # Rouge si l'objet occupe une zone restreinte, vert sinon : l'opérateur
-        # doit pouvoir juger la situation sans lire le tableau.
-        in_restricted = bool(obj.zones & set(zone_manager.restricted_zone_names()))
-        color = (0, 0, 255) if in_restricted else (0, 200, 0)
+        # La couleur d'alerte est celle de la zone en infraction, pas un rouge
+        # codé ici : deux zones de gravités différentes restent distinguables
+        # sur la vidéo. Hors infraction, la couleur neutre vient de `config.UI`.
+        color = zone_manager.alert_color_for(obj.zones) or config.UI.box_color
 
         cv2.rectangle(canvas, (x1, y1), (x2, y2), color, config.UI.box_thickness)
         label = obj.detection.label(
@@ -819,9 +808,9 @@ def annotate(frame, zone_manager: ZoneManager, objects, settings: dict[str, obje
         cv2.putText(
             canvas,
             label,
-            (x1, max(15, y1 - 6)),
+            (x1, max(15, y1 - config.UI.label_offset_px)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
+            config.UI.label_scale,
             color,
             config.UI.box_thickness,
             cv2.LINE_AA,

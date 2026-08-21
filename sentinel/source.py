@@ -410,8 +410,9 @@ class VideoSource:
         """Lit cadence et longueur, avec repli sur la configuration."""
         fps = float(self._capture.get(cv2.CAP_PROP_FPS) or 0.0)
         # Un FPS nul ou absurde est fréquent sur webcam et sur certains flux
-        # RTSP : sans repli, tout le temps métier serait faux.
-        self._fps = fps if 1.0 <= fps <= 240.0 else config.VIDEO.default_fps
+        # RTSP : sans repli, tout le temps métier serait faux. Les bornes de
+        # vraisemblance sont une valeur métier, donc dans `config.VIDEO`.
+        self._fps = config.VIDEO.credible_fps(fps)
 
         total = int(self._capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         # Un direct annonce parfois un nombre d'images fantaisiste : seule une

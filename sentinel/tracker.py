@@ -401,9 +401,9 @@ class Tracker:
             # Un FPS nul ou absurde (webcam qui ne renseigne pas la propriété)
             # donnerait une division par zéro ou un temps vidéo aberrant : on
             # retombe sur la valeur de configuration plutôt que de propager
-            # l'erreur.
-            effective_fps = fps if fps and fps > 0 else config.VIDEO.default_fps
-            self._video_time = frame_index / effective_fps
+            # l'erreur. Le contrôle de vraisemblance est celui de `config.VIDEO`,
+            # pas une seconde version locale qui pourrait en diverger.
+            self._video_time = frame_index / config.VIDEO.credible_fps(fps)
         moment = wall_time or datetime.now()
 
         detections = self._detector.track(frame)
