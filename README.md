@@ -5,7 +5,7 @@ automatique d'un brouillon de rapport d'incident horodaté avec image de preuve.
 
 > **État : ÉTAPE 9 / 9 — le cœur fonctionnel est complet.** La chaîne vidéo →
 > détection → suivi → zones → règles → rapport PDF/CSV tourne de bout en bout,
-> couverte par 366 tests, validés sur Python 3.11 / Streamlit 1.44 et Python 3.14 / Streamlit 1.54. Voir « Avancement » et « Feuille de route » plus bas.
+> couverte par 594 tests, validés sur Python 3.11 / Streamlit 1.44 et Python 3.14 / Streamlit 1.54. Voir « Avancement » et « Feuille de route » plus bas.
 
 ---
 
@@ -66,7 +66,7 @@ SENTINEL REPORT/
 ├── data/videos/           # Vidéos de test
 ├── assets/                # Identité visuelle (logos, favicon)
 ├── models/                # Poids YOLO (déposés par download_models.py)
-└── tests/                 # 366 tests, sans modèle ni vidéo : logique métier,
+└── tests/                 # 594 tests, sans modèle ni vidéo : logique métier,
                            # invariants d'architecture, hygiène des dépendances
 ```
 
@@ -857,7 +857,7 @@ Dans l'ordre, depuis la racine du projet, environnement virtuel activé :
 ```bash
 pip install -r requirements.txt   # 1. dépendances (une fois)
 python download_models.py         # 2. poids YOLO dans models/ (une fois)
-pytest -q                         # 3. vérification : 366 tests, < 5 s
+pytest -q                         # 3. vérification : 594 tests, < 6 s
 streamlit run app.py              # 4. interface (complète à partir de l'étape 7)
 ```
 
@@ -1038,7 +1038,7 @@ le décrit annonce un produit qui n'est pas livré. Cette campagne l'a corrigé.
 | E | Score affiché dans le rapport d'incident | Le même incident portait « critique » à l'écran et aucune priorité sur le papier. |
 | F | Surface publique et documentation | `__all__` décrivait le projet tel qu'il était à l'étape 3. |
 
-**Le cœur du projet est fonctionnel** : 366 tests, et la chaîne source → suivi →
+**Le cœur du projet est fonctionnel** : 594 tests, et la chaîne source → suivi →
 zones → incidents → chronologie → rapports PDF/CSV tourne de bout en bout, sur
 fichier comme sur webcam.
 
