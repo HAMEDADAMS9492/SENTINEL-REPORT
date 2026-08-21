@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Poids de modèles (téléchargés automatiquement par Ultralytics)
+models/*.pt
+*.pt
+
+# Preuves et rapports générés à l'exécution (données potentiellement sensibles)
+evidence/*
+!evidence/.gitkeep
+reports/*
+!reports/.gitkeep
+data/videos/*
+!data/videos/.gitkeep
+
+# Secrets
+.env
+
+.DS_Store
+.streamlit/secrets.toml

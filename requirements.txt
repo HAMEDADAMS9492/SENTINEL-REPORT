@@ -1,0 +1,50 @@
+# SentinelReport — dépendances (Python 3.10+)
+#
+# Installation :
+#   python -m venv .venv
+#   .venv\Scripts\activate        (Windows)   |   source .venv/bin/activate  (Linux/macOS)
+#   pip install -r requirements.txt
+#
+# Note GPU : par défaut pip installe la version CPU de PyTorch (suffisante pour
+# yolov8n.pt). Pour CUDA, installer torch depuis https://pytorch.org avant ce fichier.
+#
+# Note numpy : la borne haute « <2.1.0 » a été retirée. Elle rendait le fichier
+# ININSTALLABLE sur Python 3.13+ : aucune version de numpy < 2.1 ne publie de
+# roue (wheel) pour ces interpréteurs, pip retombait donc sur une compilation
+# depuis les sources qui échoue (« metadata-generation-failed ») et interrompait
+# l'installation de TOUT le fichier. Cette borne visait des incompatibilités de
+# 2024 entre numpy 2.x, OpenCV et PyTorch, aujourd'hui résolues.
+#
+# Note lap : dépendance NON déclarée par Ultralytics, qu'il télécharge et
+# installe TOUT SEUL au premier appel de `model.track()` (« AutoUpdate »). Sur
+# un poste sans réseau, ou en pleine analyse vidéo, c'est exactement le
+# comportement que ce projet refuse — d'où sa déclaration explicite ici, au même
+# titre que les poids récupérés par `download_models.py`.
+#
+# Note OpenCV : « opencv-python-headless » a été remplacé par « opencv-python ».
+# Ultralytics dépend lui-même de opencv-python ; déclarer la variante headless
+# en plus installait DEUX distributions fournissant le même module `cv2`, ce qui
+# est une source classique de pannes difficiles à diagnostiquer.
+
+# --- Vision par ordinateur ---
+ultralytics>=8.3.0,<9.0.0      # YOLOv8 + tracker ByteTrack intégré (mode .track())
+opencv-python>=4.9.0           # lecture vidéo / webcam, dessin, test point-dans-polygone
+supervision>=0.25.0            # conversion de détections, annotateurs (Roboflow)
+lap>=0.5.12                    # algorithme hongrois utilisé par ByteTrack — voir note
+numpy>=1.24.0                  # borne haute retirée : voir la note ci-dessous
+
+# --- Interface ---
+streamlit>=1.40.0
+
+# --- Rapports ---
+fpdf2>=2.8.0                   # export PDF (API simple, pure Python, pas de dépendance système)
+jinja2>=3.1.0                  # gabarits de texte pour les rapports
+
+# --- Utilitaires ---
+python-dotenv>=1.0.0           # chargement des variables d'environnement (clé API LLM)
+
+# --- Optionnel : rédaction assistée par LLM (point d'extension) ---
+# anthropic>=0.40.0
+
+# --- Développement / tests ---
+pytest>=8.0.0

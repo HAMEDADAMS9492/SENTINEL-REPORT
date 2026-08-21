@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="100%" height="100%">
+  <!-- Fond Anthracite -->
+  <rect width="200" height="200" fill="#0F172A" rx="28"/>
+
+  <defs>
+    <linearGradient id="shieldGradIcon" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#64748B"/>
+      <stop offset="100%" stop-color="#334155"/>
+    </linearGradient>
+
+    <linearGradient id="accentGlowIcon" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0EA5E9"/>
+      <stop offset="100%" stop-color="#0284C7"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Groupe Centré et Redimensionné -->
+  <g transform="translate(100, 100) scale(0.82)">
+    <!-- Bouclier Extérieur -->
+    <path d="M 0 -95 L 35 -95 L 70 -60 L 70 15 C 70 60, 40 85, 0 100 C -40 85, -70 60, -70 15 L -70 -60 L -35 -95 Z" 
+          fill="none" stroke="url(#shieldGradIcon)" stroke-width="6" stroke-linejoin="round"/>
+
+    <!-- Armature Intérieure -->
+    <path d="M 0 -83 L 28 -83 L 58 -53 L 58 12 C 58 48, 32 70, 0 83 C -32 70, -58 48, -58 12 L -58 -53 L -28 -83 Z" 
+          fill="none" stroke="#334155" stroke-width="2.5" stroke-dasharray="10 5" opacity="0.8"/>
+
+    <!-- Contour Œil -->
+    <path d="M -38 0 C -20 -24, 20 -24, 38 0" fill="none" stroke="#F8FAFC" stroke-width="4.5" stroke-linecap="round"/>
+    <path d="M -38 0 C -20 24, 20 24, 38 0" fill="none" stroke="#F8FAFC" stroke-width="4.5" stroke-linecap="round"/>
+
+    <!-- Réticule & Pupille -->
+    <circle cx="0" cy="0" r="14" fill="none" stroke="#0EA5E9" stroke-width="1.8" stroke-dasharray="4 3" opacity="0.7"/>
+    <circle cx="0" cy="0" r="7.5" fill="url(#accentGlowIcon)"/>
+    <circle cx="0" cy="0" r="2.8" fill="#0F172A"/>
+  </g>
+</svg>

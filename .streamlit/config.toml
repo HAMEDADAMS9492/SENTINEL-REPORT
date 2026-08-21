@@ -1,0 +1,41 @@
+# Thème de SentinelReport.
+#
+# Les couleurs sont reprises telles quelles des fichiers SVG de marque
+# (assets/), qui utilisent la palette « slate » : l'interface et le logo
+# partagent donc exactement les mêmes valeurs, sans approximation à l'œil.
+#
+#   #0F172A  anthracite   — fond du logo, texte principal
+#   #0EA5E9  bleu acier   — pupille du réticule, couleur d'accent
+#   #64748B  ardoise      — bouclier, texte secondaire
+#   #F8FAFC  blanc cassé  — encre claire du logo
+#
+# Passer par ce fichier plutôt que par du CSS injecté est délibéré : c'est
+# l'API officielle, elle survit aux mises à jour de Streamlit, et elle colore
+# aussi les composants internes (curseurs, cases, menus) qu'une feuille de
+# style ne toucherait qu'au prix de sélecteurs fragiles.
+
+[theme]
+base = "light"
+
+# Accent : le bleu du réticule du logo. Curseurs, cases cochées, bouton primaire.
+primaryColor = "#0EA5E9"
+
+# Fond de la zone principale : blanc très légèrement bleuté (slate-50/100).
+# C'est ce qui fait ressortir le pavé anthracite du logo posé dessus.
+backgroundColor = "#F4F7FB"
+
+# Fond de la barre latérale et des cartes : le gris habituel de Streamlit,
+# conservé à la demande — il distingue nettement les réglages du contenu.
+secondaryBackgroundColor = "#E9EDF3"
+
+# Texte : l'anthracite de la marque, pas un noir pur.
+textColor = "#0F172A"
+
+font = "sans serif"
+
+[server]
+# Un fichier vidéo de surveillance dépasse vite la limite de 200 Mo par défaut.
+maxUploadSize = 500
+
+[browser]
+gatherUsageStats = false
