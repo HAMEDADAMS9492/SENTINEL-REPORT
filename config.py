@@ -1051,6 +1051,25 @@ class EvidenceConfig:
         margin_px: Marge ajoutée autour de l'objet si `crop_to_object` est actif.
         crop_to_object: Sauvegarder un recadrage centré sur l'objet en plus de
             la frame complète.
+        subject_color: Couleur BGR du rectangle désignant l'objet en cause.
+        label_scale: Échelle du texte inscrit sur la capture.
+        retention_days: Durée de conservation des captures, en jours. Les
+            fichiers plus anciens sont supprimés au démarrage.
+
+            Une capture est une image de personnes prise sans leur accord,
+            conservée pour un besoin précis et borné. Ne jamais l'effacer
+            transformerait un outil d'analyse en archive permanente, ce qui n'est
+            ni le but annoncé ni défendable. `None` conserve indéfiniment : c'est
+            un choix légitime — une instruction en cours, par exemple — mais il
+            doit être explicite, pas la valeur par défaut.
+        blur_bystanders: Flouter les personnes autres que l'objet déclencheur
+            dans les captures enregistrées. Désactivé par défaut : le floutage
+            dégrade une pièce destinée à être relue par un humain, et c'est à
+            l'exploitant de trancher.
+        blur_classes: Classes concernées par le floutage.
+        blur_strength: Taille du noyau de flou, en fraction du plus petit côté
+            de la boîte. Un flou dimensionné relativement reste efficace quelle
+            que soit la taille apparente de la personne.
     """
 
     directory: Path = EVIDENCE_DIR
@@ -1060,6 +1079,12 @@ class EvidenceConfig:
     annotate: bool = True
     margin_px: int = 40
     crop_to_object: bool = False
+    subject_color: tuple[int, int, int] = (0, 0, 255)
+    label_scale: float = 0.6
+    retention_days: int | None = 30
+    blur_bystanders: bool = False
+    blur_classes: tuple[str, ...] = ("person",)
+    blur_strength: float = 0.35
 
 
 EVIDENCE: Final[EvidenceConfig] = EvidenceConfig()
@@ -1350,6 +1375,141 @@ UI: Final[UIConfig] = UIConfig()
 # ---------------------------------------------------------------------------
 # 10. Journalisation
 # ---------------------------------------------------------------------------
+
+def validate() -> None:
+    """Vérifie les invariants de la configuration, et échoue bruyamment sinon.
+
+    Pourquoi au chargement
+    -----------------------
+    Une faute de frappe dans ce fichier ne produit pas une erreur : elle produit
+    une **règle silencieusement inopérante**. Une zone dont le polygone déborde
+    de [0, 1] ne couvre rien, une ligne dégénérée ne compte jamais, un délai de
+    garde plus court que la durée de déclenchement fait crier le système sans
+    arrêt. Ces défauts ne se voient qu'en relisant un rapport vide ou saturé —
+    donc trop tard, après l'analyse.
+
+    Cette fonction est appelée à l'import du module. Le coût est de quelques
+    microsecondes ; le bénéfice est qu'une configuration fautive ne démarre pas.
+
+    Raises:
+        ValueError: Au premier invariant violé, avec le nom de l'élément en
+            cause et la raison. Un message qui dit seulement « configuration
+            invalide » oblige à relire neuf cents lignes.
+    """
+    _validate_rules()
+    _validate_zones()
+    _validate_lines()
+    _validate_schedule()
+
+
+def _validate_rules() -> None:
+    """Chaque règle globale respecte l'anti-rebond et cible des classes connues."""
+    for rule in EVENT_RULES:
+        etiquette = f"Règle « {rule.event_type.value} »"
+        if rule.cooldown_s <= rule.min_duration_s:
+            raise ValueError(
+                f"{etiquette} : cooldown_s ({rule.cooldown_s:g} s) doit dépasser "
+                f"min_duration_s ({rule.min_duration_s:g} s), sinon un même objet "
+                "redéclenche en boucle et le système produit un rapport par frame."
+            )
+        if rule.min_duration_s < 0:
+            raise ValueError(f"{etiquette} : min_duration_s ne peut pas être négatif.")
+        for class_name in rule.classes:
+            if class_name not in COCO_CLASSES:
+                raise ValueError(
+                    f"{etiquette} : la classe « {class_name} » n'existe pas dans le "
+                    "jeu COCO ; elle ne se déclenchera jamais."
+                )
+        if rule.min_occupancy is not None and rule.min_occupancy < 2:
+            raise ValueError(
+                f"{etiquette} : min_occupancy vaut {rule.min_occupancy}. Une "
+                "surdensité à moins de deux occupants n'a pas de sens."
+            )
+
+
+def _validate_zones() -> None:
+    """Polygones normalisés, noms uniques, surcharges cohérentes."""
+    if not ZONES:
+        raise ValueError(
+            "Aucune zone configurée. Toutes les règles reposent sur un chronomètre "
+            "« depuis quand cet objet est-il ici » : sans périmètre, il n'y a plus "
+            "de « ici », donc plus de durée mesurable, donc plus d'incident."
+        )
+
+    vus: set[str] = set()
+    lignes = {ligne.name for ligne in CROSSING_LINES}
+
+    for zone in ZONES:
+        etiquette = f"Zone « {zone.name} »"
+        if zone.name in vus:
+            raise ValueError(f"{etiquette} : deux zones portent ce nom, qui sert de clé.")
+        vus.add(zone.name)
+
+        if len(zone.polygon) < 3:
+            raise ValueError(
+                f"{etiquette} : {len(zone.polygon)} sommet(s), il en faut au moins 3."
+            )
+        for index, point in enumerate(zone.polygon):
+            if len(point) != 2:
+                raise ValueError(f"{etiquette}, sommet {index} : {point!r} n'est pas (x, y).")
+            x, y = point
+            if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+                raise ValueError(
+                    f"{etiquette}, sommet {index} = ({x}, {y}) : les coordonnées sont "
+                    "normalisées et doivent tenir dans [0, 1]."
+                )
+
+        if zone.crossing_line is not None and zone.crossing_line not in lignes:
+            raise ValueError(
+                f"{etiquette} : référence la ligne « {zone.crossing_line} », qui "
+                "n'existe pas dans CROSSING_LINES."
+            )
+
+        # Les surcharges sont éprouvées contre toutes les règles applicables ici.
+        for rule in EVENT_RULES:
+            if zone.handles(rule.event_type):
+                zone.rule_for(rule)
+
+
+def _validate_lines() -> None:
+    """Lignes bien formées : deux points distincts, en coordonnées normalisées."""
+    vus: set[str] = set()
+    for ligne in CROSSING_LINES:
+        etiquette = f"Ligne « {ligne.name} »"
+        if ligne.name in vus:
+            raise ValueError(f"{etiquette} : deux lignes portent ce nom, qui sert de clé.")
+        vus.add(ligne.name)
+
+        if ligne.start == ligne.end:
+            raise ValueError(
+                f"{etiquette} : les deux extrémités sont confondues. Un point n'a pas "
+                "de côté, donc aucun franchissement ne sera jamais compté."
+            )
+        for nom, (x, y) in (("start", ligne.start), ("end", ligne.end)):
+            if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+                raise ValueError(
+                    f"{etiquette}, {nom} = ({x}, {y}) : les coordonnées sont "
+                    "normalisées et doivent tenir dans [0, 1]."
+                )
+        if ligne.positive_label == ligne.negative_label:
+            raise ValueError(
+                f"{etiquette} : les deux sens portent le même libellé "
+                f"« {ligne.positive_label} ». Le comptage serait illisible."
+            )
+
+
+def _validate_schedule() -> None:
+    """Les horaires d'ouverture délimitent une plage non vide."""
+    if SCHEDULE.opening >= SCHEDULE.closing:
+        raise ValueError(
+            f"Horaires : ouverture ({SCHEDULE.opening}) doit précéder la fermeture "
+            f"({SCHEDULE.closing}). En l'état, tout instant serait « hors horaires »."
+        )
+
+
+# Contrôle à l'import. Une configuration fautive ne doit pas démarrer.
+validate()
+
 
 LOG_LEVEL: Final[str] = os.environ.get("SENTINEL_LOG_LEVEL", "INFO")
 LOG_FORMAT: Final[str] = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"

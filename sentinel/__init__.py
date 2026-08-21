@@ -45,6 +45,7 @@ from sentinel.zones import ZoneManager
 from sentinel.occupancy import OccupancyChange, ZoneOccupancy
 from sentinel.crossing import LineCounter, LineCrossing
 from sentinel.events import Event, EventEngine, PriorityScore
+from sentinel.evidence import EvidenceWriter, blur_bystanders
 from sentinel.timeline import SessionContext, Timeline, TimelineFact, TimelineSlice
 from sentinel.report import ReportGenerator
 from sentinel.session_report import SessionReportGenerator, sort_by_priority
@@ -72,6 +73,9 @@ __all__ = [
     "Event",
     "EventEngine",
     "PriorityScore",
+    # Preuves
+    "EvidenceWriter",
+    "blur_bystanders",
     # Chronologie
     "SessionContext",
     "Timeline",

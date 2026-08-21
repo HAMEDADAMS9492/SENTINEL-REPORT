@@ -3,7 +3,11 @@
 C'est le cœur métier du projet : transformer « un objet suivi se trouve dans une
 zone depuis N secondes » en « incident de sécurité qualifié ».
 
-Le moteur ne détecte rien. Il consomme des `TrackedObject` (mémoire temporelle)
+Le moteur ne détecte rien, ne dessine rien et n'écrit aucun fichier : la
+capture des preuves appartient à `evidence.py`, qui a d'autres raisons de changer
+(format, conservation, anonymisation).
+
+Il consomme des `TrackedObject` (mémoire temporelle)
 et des noms de zones (géométrie), applique les `EventRule` de `config.py`, et
 produit des `Event` immuables. Ajouter un nouveau type d'incident consiste à
 ajouter une `EventRule` dans la configuration et un prédicat dans ce module —
@@ -388,6 +392,7 @@ class EventEngine:
         schedule: config.ScheduleConfig | None = None,
         scoring: config.ScoringConfig | None = None,
         occupancy: ZoneOccupancy | None = None,
+        evidence: object | None = None,
     ) -> None:
         """Initialise le moteur.
 
@@ -397,6 +402,8 @@ class EventEngine:
             schedule: Horaires d'ouverture. `None` = `config.SCHEDULE`.
             scoring: Barème de priorité. `None` = `config.SCORING`.
             occupancy: Compteur d'occupation. `None` = un compteur neuf.
+            evidence: Écrivain de preuves (`sentinel.evidence.EvidenceWriter`).
+                `None` = un écrivain neuf.
         """
         self._zones = zone_manager
         self._rules: tuple[config.EventRule, ...] = tuple(
@@ -408,6 +415,10 @@ class EventEngine:
         # il n'en implémente pas la logique. `ZoneOccupancy` reste testable seul,
         # sans polygone ni règle.
         self.occupancy = ZoneOccupancy() if occupancy is None else occupancy
+        # Import différé : `evidence.py` importe `Event` depuis ce module.
+        from sentinel.evidence import EvidenceWriter
+
+        self._evidence = EvidenceWriter() if evidence is None else evidence
         self._history: list[Event] = []
         self._sequence: dict[str, int] = {}
 
@@ -495,7 +506,11 @@ class EventEngine:
                 duration_s=outcome.duration_s,
                 details=outcome.details,
             )
-            event = self._attach_evidence(event, frame, obj)
+            # La capture de preuve appartient à `evidence.py` : écrire des
+            # fichiers, dessiner dessus et appliquer une politique de
+            # conservation n'a pas les mêmes raisons de changer qu'une règle
+            # métier. Le moteur délègue et n'en sait pas plus.
+            event = self._evidence.attach(event, frame, obj, context.objects)
 
             obj.mark_event(rule.event_type.value, video_time)
             self._history.append(event)
@@ -992,129 +1007,6 @@ class EventEngine:
         day = wall_time.strftime("%Y%m%d")
         self._sequence[day] = self._sequence.get(day, 0) + 1
         return f"{config.REPORT.reference_prefix}-{day}-{self._sequence[day]:04d}"
-
-    def _attach_evidence(self, event: Event, frame: np.ndarray, obj: TrackedObject) -> Event:
-        """Retourne une copie de l'incident enrichie du chemin de sa preuve.
-
-        `Event` étant immuable, on ne peut pas lui affecter le chemin après coup :
-        on reconstruit l'objet. C'est le prix — modeste — de la garantie qu'un
-        incident déjà publié ne change jamais.
-
-        Args:
-            event: Incident sans preuve.
-            frame: Frame au moment de l'incident.
-            obj: Objet concerné.
-
-        Returns:
-            L'incident, avec `evidence_path` renseigné si la capture a réussi.
-        """
-        path = self._capture_evidence(frame, obj, event)
-        if path is None:
-            return event
-
-        # `replace()` plutôt qu'une reconstruction champ par champ : tout champ
-        # ajouté à `Event` serait sinon silencieusement perdu ici — c'est
-        # exactement ce qui serait arrivé au score de priorité.
-        return replace(event, evidence_path=path)
-
-    def _capture_evidence(
-        self, frame: np.ndarray, obj: TrackedObject, event: Event
-    ) -> Path | None:
-        """Écrit la capture justificative sur disque.
-
-        Args:
-            frame: Frame au moment de l'incident.
-            obj: Objet concerné (pour l'annotation ou le recadrage).
-            event: Incident, dont l'identifiant sert au nom de fichier.
-
-        Returns:
-            Le chemin du fichier écrit, ou `None` en cas d'échec (une capture
-            ratée ne doit pas annuler l'incident).
-        """
-        if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
-            return None
-
-        settings = config.EVIDENCE
-        try:
-            filename = settings.filename_template.format(
-                timestamp=event.timestamp.strftime(settings.timestamp_format),
-                event_type=event.event_type.value,
-                track_id=obj.track_id,
-                zone=event.zone_name or "hors-zone",
-            )
-            destination = settings.directory / filename
-
-            image = frame.copy()
-            if settings.annotate:
-                image = self._annotate_evidence(image, obj, event)
-            if settings.crop_to_object:
-                image = self._crop_around(image, obj.detection, settings.margin_px)
-
-            settings.directory.mkdir(parents=True, exist_ok=True)
-            written = cv2.imwrite(
-                str(destination),
-                image,
-                [int(cv2.IMWRITE_JPEG_QUALITY), settings.jpeg_quality],
-            )
-            if not written:
-                logger.warning("Écriture de la preuve refusée par OpenCV : %s", destination)
-                return None
-            return destination
-        except Exception:
-            # Un disque plein ou un nom de fichier invalide ne doit pas faire
-            # disparaître l'incident : le rapport existera, simplement sans image.
-            logger.exception("Capture de preuve impossible pour l'incident %s.", event.event_id)
-            return None
-
-    @staticmethod
-    def _annotate_evidence(image: np.ndarray, obj: TrackedObject, event: Event) -> np.ndarray:
-        """Entoure l'objet en cause et inscrit le type d'incident.
-
-        Args:
-            image: Image à annoter (modifiée en place).
-            obj: Objet concerné.
-            event: Incident décrit.
-
-        Returns:
-            L'image annotée.
-        """
-        from sentinel.zones import _ascii_label  # translittération partagée
-
-        x1, y1, x2, y2 = obj.detection.as_int_box()
-        color = (0, 0, 255)  # rouge BGR : c'est l'objet en cause
-        cv2.rectangle(image, (x1, y1), (x2, y2), color, config.UI.box_thickness)
-
-        label = _ascii_label(f"{event.event_type.value} #{obj.track_id}")
-        cv2.putText(
-            image,
-            label,
-            (x1, max(15, y1 - 8)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            color,
-            config.UI.box_thickness,
-            cv2.LINE_AA,
-        )
-        return image
-
-    @staticmethod
-    def _crop_around(image: np.ndarray, detection: Detection, margin_px: int) -> np.ndarray:
-        """Recadre l'image autour d'une détection, avec une marge.
-
-        Args:
-            image: Image source.
-            detection: Détection à cadrer.
-            margin_px: Marge ajoutée de chaque côté.
-
-        Returns:
-            Le recadrage, borné aux limites de l'image.
-        """
-        height, width = image.shape[:2]
-        x1, y1, x2, y2 = detection.as_int_box()
-        return image[
-            max(0, y1 - margin_px) : min(height, y2 + margin_px),
-            max(0, x1 - margin_px) : min(width, x2 + margin_px),
-        ]
 
     # Table d'aiguillage type d'incident -> prédicat. Une table plutôt qu'une
     # cascade de `if` : ajouter une règle consiste à ajouter une entrée, et un

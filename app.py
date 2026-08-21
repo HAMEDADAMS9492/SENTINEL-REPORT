@@ -30,6 +30,7 @@ from sentinel.detector import Detector
 from sentinel.events import Event, EventEngine
 from sentinel.exceptions import ModelLoadError, SentinelError, SourceDisconnectedError
 from sentinel.crossing import LineCounter
+from sentinel.evidence import EvidenceWriter
 from sentinel.report import ReportGenerator
 from sentinel.session_report import SessionReportGenerator
 from sentinel.source import VideoSource, detect_kind
@@ -1465,6 +1466,27 @@ def _timeline_csv(
 # ---------------------------------------------------------------------------
 
 
+@st.cache_resource(show_spinner=False)
+def purge_expired_evidence() -> int:
+    """Applique la politique de conservation des captures, une fois par session.
+
+    `@st.cache_resource` sert ici de « une seule fois » : Streamlit réexécute le
+    script à chaque interaction, et balayer le dossier des preuves à chaque clic
+    serait aussi inutile que coûteux.
+
+    Le démarrage est le bon moment : c'est le seul instant où l'on est certain
+    qu'aucune analyse n'est en cours, donc qu'aucun fichier examiné n'est en
+    train d'être écrit.
+
+    Returns:
+        Le nombre de fichiers supprimés.
+    """
+    supprimes = EvidenceWriter().purge_expired()
+    if supprimes:
+        logger.info("Purge au démarrage : %d preuve(s) expirée(s).", supprimes)
+    return supprimes
+
+
 def main() -> None:
     """Point d'entrée de l'application.
 
@@ -1477,6 +1499,7 @@ def main() -> None:
     configure_page()  # doit rester la toute première commande Streamlit
     inject_styles()
     render_header()
+    purge_expired_evidence()
 
     st.session_state.setdefault("events", [])
     events: list[Event] = st.session_state["events"]

@@ -731,6 +731,43 @@ tard, chacun reflétant l'état à son instant d'édition.
 
 ---
 
+### 3.9 Garde-fous : configuration, conservation, minimisation
+
+**Une configuration fautive ne démarre pas.** Une faute de frappe dans
+`config.py` ne produit pas une erreur, elle produit une **règle silencieusement
+inopérante** : un polygone hors de [0, 1] ne couvre rien, une ligne dégénérée ne
+compte jamais, un délai de garde trop court fait crier le système sans arrêt. Ces
+défauts ne se voient qu'en relisant un rapport vide ou saturé — donc après
+l'analyse. `config.validate()` tourne **à l'import** et échoue avec le nom de
+l'élément en cause et la conséquence concrète ; un message qui dirait seulement
+« configuration invalide » obligerait à relire neuf cents lignes.
+
+**Les preuves ont une durée de vie.** `EVIDENCE.retention_days` vaut 30 jours par
+défaut, et la purge tourne au démarrage — le seul instant où l'on est certain
+qu'aucune analyse n'est en cours. Une capture est une image de personnes prise
+sans leur accord, conservée pour un besoin précis et borné dans le temps ; ne
+jamais l'effacer transformerait un outil d'analyse en archive permanente, ce qui
+n'est ni le but annoncé ni défendable. `None` conserve indéfiniment : un choix
+légitime — une instruction en cours — mais qui doit être explicite.
+
+**Le floutage est une accroche, pas une promesse.** `EVIDENCE.blur_bystanders`
+floute les personnes autres que l'objet déclencheur dans les captures
+enregistrées. Il est **désactivé par défaut** : le floutage dégrade une pièce
+destinée à être relue par un humain, et c'est à l'exploitant de trancher. Ce
+n'est pas de l'anonymisation au sens réglementaire — le flou porte sur la boîte
+entière et non sur les visages, et il ne s'applique qu'aux personnes que le
+détecteur a vues. Une personne manquée par le modèle n'est pas floutée. Le
+présenter autrement serait une promesse que le code ne tient pas.
+
+**La capture a quitté le moteur.** `events.py` affirmait « le moteur ne détecte
+rien et ne dessine rien » tout en ouvrant des fichiers cent vingt lignes plus
+bas. Les deux responsabilités ont des raisons de changer différentes : le moteur
+change quand une règle métier évolue, la capture quand la conservation, le format
+ou l'anonymisation évoluent. `evidence.py` les sépare, et c'est ce qui a permis
+d'ajouter la rétention et le floutage sans relire une seule ligne de règle.
+
+---
+
 ## 4. Installation
 
 Prérequis : **Python 3.10 ou supérieur** (le code utilise la syntaxe `X | None`).
