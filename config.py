@@ -564,11 +564,25 @@ class GeometryConfig:
             valider la sortie. Plus élevé que l'entrée : perdre un objet est
             plus fréquent que le détecter à tort, et une sortie prématurée coûte
             un incident manqué.
+        margin_ratio: Largeur de la **bande d'incertitude** autour de la
+            frontière, exprimée en fraction de la hauteur apparente de l'objet.
+            Entrer exige d'être à l'intérieur d'au moins `margin_ratio × hauteur` ;
+            sortir exige d'en être sorti d'autant. Entre les deux, l'appartenance
+            ne change pas.
+
+            Même raisonnement qu'au § 3.5 du README : une marge en pixels fixes
+            vaudrait un pas de côté au premier plan et trois mètres au fond du
+            champ. La rapporter à la taille apparente lui donne le même sens à
+            toutes les profondeurs, sans calibration.
+
+            0.0 supprime la bande et rend le comportement identique à la version
+            précédente — utile pour comparer.
     """
 
     anchor: str = "bottom_center"
     min_overlap_frames: int = 2
     exit_tolerance_frames: int = 4
+    margin_ratio: float = 0.08
 
 
 GEOMETRY: Final[GeometryConfig] = GeometryConfig()

@@ -32,12 +32,28 @@ import math
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 import config
 from sentinel.detection import Detection, count_by_class
 
 logger = logging.getLogger(__name__)
+
+
+def _as_margins(zones: Mapping[str, float] | Iterable[str]) -> dict[str, float]:
+    """Normalise l'argument de `update_zones` en marges signées.
+
+    Args:
+        zones: Marges déjà calculées, ou simple énumération de noms.
+
+    Returns:
+        Un dictionnaire `{zone: marge}`. Une énumération de noms devient une
+        appartenance franche (`+inf`) : l'appelant affirme la présence sans
+        prétendre mesurer une distance.
+    """
+    if isinstance(zones, Mapping):
+        return dict(zones)
+    return {nom: math.inf for nom in zones}
 
 
 @dataclass
@@ -164,20 +180,56 @@ class TrackedObject:
         while self.history and self.history[0][0] < cutoff:
             self.history.popleft()
 
-    def update_zones(self, zone_names: Iterable[str], video_time: float) -> None:
+    def update_zones(
+        self, zones: Mapping[str, float] | Iterable[str], video_time: float
+    ) -> None:
         """Met à jour les zones occupées et chronomètre les entrées.
 
         `Tracker` ne connaît pas la géométrie : c'est `ZoneManager` qui calcule
-        l'appartenance et le pipeline qui appelle cette méthode. Cette inversion
+        les marges et le pipeline qui appelle cette méthode. Cette inversion
         garde `tracker.py` indépendant de `zones.py`.
 
+        Deux hystérésis se cumulent, et elles ne traitent pas le même défaut :
+
+        * **Spatiale** — la bande d'incertitude `config.GEOMETRY.margin_ratio`
+          autour de la frontière. Elle absorbe l'imprécision de la boîte : deux
+          pixels de tremblement ne font plus basculer l'appartenance. Tant que
+          l'objet est dans la bande, son état ne change pas.
+        * **Temporelle** — les compteurs de frames consécutives. Ils absorbent
+          les détections erratiques : une incursion d'une frame ne vaut pas
+          entrée, une disparition d'une frame ne vaut pas sortie.
+
+        La première ne remplace pas la seconde. Un objet peut franchir nettement
+        la bande sur une frame isolée par une erreur de détection ; seul le
+        compteur l'écarte.
+
         Args:
-            zone_names: Zones contenant l'objet sur la frame courante.
+            zones: Marges signées `{zone: distance / hauteur_apparente}` telles
+                que les rend `ZoneManager.zones_for()`. Une simple liste de noms
+                reste acceptée : elle vaut appartenance franche, ce qui laisse
+                les appelants qui ne calculent pas de marge — et les tests —
+                exprimer une intention sans ambiguïté.
             video_time: Temps vidéo de la frame.
         """
-        current = set(zone_names)
+        marges = _as_margins(zones)
+        seuil = max(0.0, config.GEOMETRY.margin_ratio)
         entry_frames = max(1, config.GEOMETRY.min_overlap_frames)
         exit_frames = max(1, config.GEOMETRY.exit_tolerance_frames)
+
+        # Franchement dedans / franchement dehors. Ce qui reste entre les deux
+        # est dans la bande : ni entrée validée, ni sortie amorcée.
+        current = {nom for nom, marge in marges.items() if marge >= seuil}
+        # `nom not in current` n'est pas décoratif : à `margin_ratio = 0`, la
+        # bande est nulle et une marge de 0 vérifierait les deux conditions à la
+        # fois — l'objet entrerait et sortirait dans la même frame.
+        outside = {
+            nom
+            for nom, marge in marges.items()
+            if marge <= -seuil and nom not in current
+        }
+        # Une zone absente de la mesure est réputée franchement dehors : c'est le
+        # cas d'un appelant qui ne transmet que les zones occupées.
+        outside |= (self.zones | set(self._pending_zones)) - set(marges)
 
         # -- Entrées : il faut `min_overlap_frames` frames consécutives --------
         for zone in current:
@@ -198,12 +250,14 @@ class TrackedObject:
                 self._pending_zones[zone] = (seen, since)
 
         # Une entrée en cours de validation qui s'interrompt repart de zéro.
+        # Seule une sortie **franche** l'annule : rester dans la bande gèle le
+        # compte plutôt que de le perdre.
         for zone in list(self._pending_zones):
-            if zone not in current:
+            if zone in outside:
                 del self._pending_zones[zone]
 
         # -- Sorties : il faut `exit_tolerance_frames` frames consécutives -----
-        for zone in list(self.zones - current):
+        for zone in list(self.zones & outside):
             missed = self._absent_zones.get(zone, 0) + 1
             if missed >= exit_frames:
                 self._absent_zones.pop(zone, None)

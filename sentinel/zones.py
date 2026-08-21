@@ -32,6 +32,7 @@ argumentaire qui refuse une librairie tout en l'installant ne tient pas.
 from __future__ import annotations
 
 import logging
+import math
 import unicodedata
 from typing import Iterable, Sequence
 
@@ -63,6 +64,39 @@ def _ascii_label(text: str) -> str:
     return decomposed.encode("ascii", "ignore").decode("ascii")
 
 
+def _covers_frame(polygon: Sequence[Sequence[float]], tolerance: float = 0.995) -> bool:
+    """Indique si un polygone normalisé couvre (presque) tout le champ.
+
+    Pourquoi cette question se pose
+    --------------------------------
+    La bande d'incertitude de la phase 3 suppose qu'une frontière **sépare deux
+    espaces réels** : dedans et dehors. Le bord de l'image ne sépare rien — un
+    objet ne peut pas en sortir latéralement, il disparaît. Appliquer une marge à
+    une zone qui épouse le cadre créerait un anneau aveugle tout autour de
+    l'image : une personne dont les pieds touchent le bas du cadre resterait
+    éternellement « en cours d'entrée ».
+
+    L'aire est calculée par la formule du lacet (Gauss), en valeur absolue pour
+    accepter les deux sens de tracé.
+
+    Args:
+        polygon: Sommets normalisés dans [0, 1].
+        tolerance: Fraction du champ à partir de laquelle la zone est réputée
+            plein cadre.
+
+    Returns:
+        True si le polygone couvre au moins `tolerance` de l'image.
+    """
+    if len(polygon) < 3:
+        return False
+
+    aire = 0.0
+    for index, (x1, y1) in enumerate(polygon):
+        x2, y2 = polygon[(index + 1) % len(polygon)]
+        aire += x1 * y2 - x2 * y1
+    return abs(aire) / 2.0 >= tolerance
+
+
 class ZoneManager:
     """Convertit les zones de la configuration en zones pixel et teste l'appartenance.
 
@@ -85,6 +119,11 @@ class ZoneManager:
 
         self._zones: tuple[config.SurveillanceZone, ...] = selected
         self._by_name: dict[str, config.SurveillanceZone] = {zone.name: zone for zone in selected}
+
+        # Zones dont la frontière est celle de l'image. Voir `_covers_frame`.
+        self._borderless: frozenset[str] = frozenset(
+            zone.name for zone in selected if _covers_frame(zone.polygon)
+        )
 
         # Résolution inconnue tant qu'aucune frame n'a été vue.
         self._frame_size: tuple[int, int] | None = None
@@ -215,7 +254,7 @@ class ZoneManager:
         )
         return detection.anchor
 
-    def zones_for(self, detection: Detection) -> list[str]:
+    def zones_for(self, detection: Detection) -> dict[str, float]:
         """Retourne les noms des zones contenant une détection.
 
         Le point testé est l'ancre configurée dans `config.GEOMETRY.anchor`
@@ -237,35 +276,46 @@ class ZoneManager:
             )
 
         point = self._anchor_point(detection)
-        # `measureDist=False` : on ne veut que le signe. Le retour vaut +1
-        # (dedans), 0 (exactement sur le bord) ou -1 (dehors) ; un objet sur la
-        # frontière est compté dedans, choix conservateur pour un système
-        # d'alerte.
-        return [
-            name
-            for name, polygon in self._polygons.items()
-            if cv2.pointPolygonTest(polygon, point, False) >= 0
-        ]
+        echelle = max(1.0, float(detection.height))
 
-    def zones_for_all(self, detections: Sequence[Detection]) -> dict[int, list[str]]:
+        marges: dict[str, float] = {}
+        for name, polygon in self._polygons.items():
+            # `measureDist=True` : on veut la distance **signée** au bord, en
+            # pixels — positive dedans, négative dehors. C'est le même lancer de
+            # rayon qu'avec `measureDist=False`, avec la distance en prime.
+            distance = cv2.pointPolygonTest(polygon, point, True)
+
+            if name in self._borderless:
+                # Le bord de l'image n'est pas un mur : un objet ne peut pas en
+                # sortir latéralement sans disparaître du champ. Exiger une marge
+                # créerait un angle mort tout autour de l'image — une personne
+                # dont les pieds touchent le bas du cadre ne serait jamais
+                # « entrée ». On rend donc un verdict franc.
+                marges[name] = math.inf if distance >= 0 else -math.inf
+            else:
+                marges[name] = distance / echelle
+
+        return marges
+
+    def zones_for_all(self, detections: Sequence[Detection]) -> dict[int, dict[str, float]]:
         """Localise toutes les détections d'une frame en un appel.
 
         Args:
             detections: Détections de la frame.
 
         Returns:
-            Un dictionnaire `{index_dans_la_liste: [noms_de_zones]}`. Les
-            détections situées hors de toute zone sont **absentes** du
-            dictionnaire : l'appelant utilise `.get(i, [])`.
+            Un dictionnaire `{index_dans_la_liste: {zone: marge_signée}}`. Les
+            détections franchement hors de toute zone sont **absentes** du
+            dictionnaire : l'appelant utilise `.get(i, {})`.
 
         Raises:
             RuntimeError: Si `initialize()` n'a pas été appelé.
         """
-        located: dict[int, list[str]] = {}
+        located: dict[int, dict[str, float]] = {}
         for index, detection in enumerate(detections):
-            names = self.zones_for(detection)
-            if names:
-                located[index] = names
+            marges = self.zones_for(detection)
+            if any(marge >= 0 for marge in marges.values()):
+                located[index] = marges
         return located
 
     def restricted_zone_names(self) -> list[str]:

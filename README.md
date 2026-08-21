@@ -363,6 +363,37 @@ rendre en échange, et rendait ce paragraphe faux en pratique.
    fonctionne donc en 720p, en 1080p et sur webcam ; `ZoneManager.initialize()`
    les convertit en pixels quand la première frame arrive.
 
+### 3.3 bis Frontière à marge signée
+
+Une boîte de détection tremble de quelques pixels d'une frame à l'autre. Quand
+son point d'appui longe la frontière d'une zone, l'appartenance oscille — et
+chaque oscillation **remet le chronomètre à zéro**. Une intrusion de cinquante
+secondes le long d'une clôture n'est alors jamais signalée.
+
+`cv2.pointPolygonTest` sait rendre la **distance signée** au bord (`measureDist=True`)
+et pas seulement le côté : positive dedans, négative dehors. On l'exploite pour
+créer une bande d'incertitude autour de la frontière — entrer exige d'être à
+l'intérieur d'au moins `margin_ratio × hauteur apparente`, sortir exige d'en être
+sorti d'autant, et entre les deux l'appartenance ne change pas.
+
+La marge est **relative à la taille apparente**, pour la même raison qu'au § 3.5 :
+vingt pixels valent un pas de côté au premier plan et trois mètres au fond du
+champ. `Detection` porte déjà `.height`, donc `zones.py` calcule la marge sans
+rien demander au tracker — le flux reste unidirectionnel.
+
+**Deux hystérésis, deux défauts différents.** La bande *spatiale* absorbe
+l'imprécision de la boîte ; les compteurs de frames *temporels* (§ 3.4) absorbent
+les détections erratiques. La première ne remplace pas la seconde : un objet peut
+franchir nettement la bande sur une frame isolée par une erreur de détection, et
+seul le compteur l'écarte.
+
+**Le bord de l'image n'est pas une frontière.** Une zone qui épouse le cadre est
+exemptée de marge. Un objet ne peut pas sortir latéralement de l'image — il
+disparaît. Lui appliquer une bande créerait un anneau aveugle tout autour du
+champ : une personne dont les pieds touchent le bas du cadre resterait
+éternellement « en cours d'entrée ». C'est exactement le cas de la zone plein
+cadre livrée par défaut, d'où l'exemption.
+
 ### 3.4 La mémoire temporelle (`tracker.py`)
 
 ByteTrack fournit des identifiants ; il ne fournit aucune **histoire**. C'est le

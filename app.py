@@ -983,7 +983,12 @@ def process_video(source: VideoSource, settings: dict[str, object], pipeline) ->
                 )
 
                 for obj in objects:
-                    obj.update_zones(zone_manager.zones_for(obj.detection), tracker.video_time)
+                    # `zones_for` rend des marges signées, relatives à la taille
+                    # apparente de l'objet ; l'hystérésis les exploite dans
+                    # `update_zones`. L'interface ne fait que transmettre.
+                    obj.update_zones(
+                        zone_manager.zones_for(obj.detection), tracker.video_time
+                    )
 
                 events = event_engine.evaluate(
                     objects, tracker, image, tracker.video_time, frame.wall_time

@@ -46,6 +46,18 @@ def _zone(
     )
 
 
+def _dedans(manager, detection) -> list[str]:
+    """Zones où la détection se trouve, d'après les marges signées.
+
+    `zones_for()` rend désormais `{zone: marge}` pour **toutes** les zones — la
+    marge étant la distance signée au bord, rapportée à la hauteur apparente de
+    l'objet. Ces tests ne portent pas sur la largeur de la bande d'incertitude
+    (voir `test_zone_margin.py`) mais sur la géométrie : on ne garde donc que le
+    signe.
+    """
+    return sorted(nom for nom, marge in manager.zones_for(detection).items() if marge >= 0)
+
+
 def _at(x: float, y: float, *, height: float = 40.0) -> Detection:
     """Détection dont le point d'appui (bas de boîte) tombe exactement en (x, y)."""
     return Detection(
@@ -158,15 +170,15 @@ def test_point_inside_and_outside() -> None:
     """Cas nominal : moitié gauche dedans, moitié droite dehors."""
     manager = _ready_manager(_zone())
 
-    assert manager.zones_for(_at(250.0, 500.0)) == ["Quai"]
-    assert manager.zones_for(_at(750.0, 500.0)) == []
+    assert _dedans(manager, _at(250.0, 500.0)) == ["Quai"]
+    assert _dedans(manager, _at(750.0, 500.0)) == []
 
 
 def test_point_on_the_border_counts_as_inside() -> None:
     """Choix conservateur pour un système d'alerte : le bord appartient à la zone."""
     manager = _ready_manager(_zone())
 
-    assert manager.zones_for(_at(500.0, 500.0)) == ["Quai"]
+    assert _dedans(manager, _at(500.0, 500.0)) == ["Quai"]
 
 
 def test_anchor_is_the_feet_not_the_box_centre() -> None:
@@ -183,7 +195,7 @@ def test_anchor_is_the_feet_not_the_box_centre() -> None:
 
     assert detection.center[1] == 300.0  # hors zone
     assert detection.anchor[1] == 500.0  # dans la zone
-    assert manager.zones_for(detection) == ["Quai"]
+    assert _dedans(manager, detection) == ["Quai"]
 
 
 def test_anchor_mode_is_configurable(monkeypatch) -> None:
@@ -193,7 +205,7 @@ def test_anchor_mode_is_configurable(monkeypatch) -> None:
     detection = _at(500.0, 500.0, height=400.0)
 
     monkeypatch.setattr(config, "GEOMETRY", config.GeometryConfig(anchor="center"))
-    assert manager.zones_for(detection) == []
+    assert _dedans(manager, detection) == []
 
 
 def test_unknown_anchor_falls_back_instead_of_crashing(monkeypatch) -> None:
@@ -201,7 +213,7 @@ def test_unknown_anchor_falls_back_instead_of_crashing(monkeypatch) -> None:
     manager = _ready_manager(_zone())
     monkeypatch.setattr(config, "GEOMETRY", config.GeometryConfig(anchor="milieu"))
 
-    assert manager.zones_for(_at(250.0, 500.0)) == ["Quai"]
+    assert _dedans(manager, _at(250.0, 500.0)) == ["Quai"]
 
 
 def test_overlapping_zones_are_all_reported() -> None:
@@ -210,7 +222,7 @@ def test_overlapping_zones_are_all_reported() -> None:
     right = _zone(name="Hall", polygon=((0.4, 0.0), (1.0, 0.0), (1.0, 1.0), (0.4, 1.0)))
     manager = _ready_manager(left, right)
 
-    assert sorted(manager.zones_for(_at(500.0, 500.0))) == ["Hall", "Quai"]
+    assert _dedans(manager, _at(500.0, 500.0)) == ["Hall", "Quai"]
 
 
 def test_zones_for_all_omits_objects_outside_every_zone() -> None:
@@ -220,7 +232,8 @@ def test_zones_for_all_omits_objects_outside_every_zone() -> None:
 
     located = manager.zones_for_all(detections)
 
-    assert located == {0: ["Quai"], 2: ["Quai"]}
+    assert sorted(located) == [0, 2], "Seuls les objets localisés figurent au dictionnaire."
+    assert all(marges["Quai"] >= 0 for marges in located.values())
     assert located.get(1, []) == []
 
 
@@ -273,7 +286,7 @@ def test_full_frame_zone_is_not_painted_over_the_video() -> None:
     annotated = manager.draw(frame)
 
     assert annotated.sum() == 0, "La zone plein cadre a été peinte sur la vidéo."
-    assert manager.zones_for(_at(500.0, 500.0)) == ["Champ de la caméra"]
+    assert _dedans(manager, _at(500.0, 500.0)) == ["Champ de la caméra"]
 
 
 def test_default_configuration_watches_the_whole_frame() -> None:
@@ -288,7 +301,7 @@ def test_default_configuration_watches_the_whole_frame() -> None:
     restricted = set(manager.restricted_zone_names())
 
     for x, y in ((5.0, 5.0), (995.0, 5.0), (500.0, 500.0), (995.0, 995.0)):
-        assert restricted & set(manager.zones_for(_at(x, y))), f"angle mort en ({x}, {y})"
+        assert restricted & set(_dedans(manager, _at(x, y))), f"angle mort en ({x}, {y})"
 
 
 def test_sub_zones_remain_possible() -> None:
@@ -302,8 +315,8 @@ def test_sub_zones_remain_possible() -> None:
         ),
     )
 
-    assert manager.zones_for(_at(250.0, 500.0)) == ["Quai"]
-    assert manager.zones_for(_at(750.0, 500.0)) == ["Hall"]
+    assert _dedans(manager, _at(250.0, 500.0)) == ["Quai"]
+    assert _dedans(manager, _at(750.0, 500.0)) == ["Hall"]
     assert manager.restricted_zone_names() == ["Quai"]
 
 
