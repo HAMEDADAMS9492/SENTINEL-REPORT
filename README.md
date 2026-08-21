@@ -5,7 +5,7 @@ automatique d'un brouillon de rapport d'incident horodaté avec image de preuve.
 
 > **État : ÉTAPE 9 / 9 — le cœur fonctionnel est complet.** La chaîne vidéo →
 > détection → suivi → zones → règles → rapport PDF/CSV tourne de bout en bout,
-> couverte par 238 tests, validés sur Python 3.11 / Streamlit 1.44 et Python 3.14 / Streamlit 1.54. Voir « Avancement » et « Feuille de route » plus bas.
+> couverte par 366 tests, validés sur Python 3.11 / Streamlit 1.44 et Python 3.14 / Streamlit 1.54. Voir « Avancement » et « Feuille de route » plus bas.
 
 ---
 
@@ -66,7 +66,8 @@ SENTINEL REPORT/
 ├── data/videos/           # Vidéos de test
 ├── assets/                # Identité visuelle (logos, favicon)
 ├── models/                # Poids YOLO (déposés par download_models.py)
-└── tests/                 # Tests de fumée, sans modèle ni vidéo
+└── tests/                 # 366 tests, sans modèle ni vidéo : logique métier,
+                           # invariants d'architecture, hygiène des dépendances
 ```
 
 ### 2.2 Pourquoi un paquet `sentinel/` plutôt que des fichiers à la racine
@@ -127,13 +128,22 @@ plus souvent et le point d'entrée.
 └───────────────────┘
         │  list[Event]  (+ capture de preuve écrite dans /evidence)
         ▼
-┌───────────────────┐
-│ ReportGenerator   │  gabarit français → texte → PDF (fpdf2)
-└───────────────────┘
-        │
-        ▼
-   Rapport d'incident + image de preuve
+┌───────────────────┐        ┌───────────────────┐
+│ ReportGenerator   │        │ Timeline.observe()│  transitions : entrées,
+│  gabarit → PDF    │        │                   │  sorties, incidents
+└───────────────────┘        └───────────────────┘
+        │                            │
+        ▼                            ▼
+   Rapport d'incident        ┌───────────────────┐
+   + image de preuve         │ SessionReport     │  1. incidents par priorité
+                             │  Generator        │  2. chronologie par tranches
+                             └───────────────────┘
 ```
+
+`Timeline` observe **les objets retenus par le tracker**, pas ceux visibles sur
+la frame : la rétention absorbe déjà les occlusions courtes, et lui passer la
+liste de la frame produirait une fausse sortie suivie d'une fausse entrée chaque
+fois qu'un objet passe derrière un poteau.
 
 Le sens de lecture est important : **l'information ne remonte jamais**. Le
 détecteur ignore l'existence des zones, les zones ignorent les événements, les
@@ -206,8 +216,11 @@ incident réseau, et l'analyse déjà produite reste valide. Les URL RTSP portan
 souvent des identifiants, ni les journaux ni les messages d'erreur ne recopient
 le mot de passe.
 
-> Le module est écrit et testé (29 tests) ; son branchement dans l'interface
-> Streamlit fait l'objet d'une étape ultérieure.
+> `app.py` consomme `VideoSource.frames()` : c'est le seul chemin de lecture
+> du projet. Un test structurel (`tests/test_app_source.py`) vérifie qu'aucun
+> `cv2.VideoCapture` ne réapparaît dans l'interface — la régression serait
+> silencieuse, puisque l'analyse d'un fichier continuerait de marcher et que
+> seul le direct deviendrait faux.
 
 ### 3.1 YOLO — détection d'objets en une passe (*one-stage*)
 
@@ -332,6 +345,11 @@ L'argument de la vectorisation ne tient pas à cette échelle : quelques dizaine
 de tests par frame représentent quelques microsecondes, face aux ~140 ms
 d'inférence YOLO qui les précèdent. Optimiser le maillon 10 000 fois moins cher
 que le goulot d'étranglement n'a pas de sens.
+
+La dépendance a été **retirée du projet**, pas seulement écartée du code : la
+laisser déclarée dans `requirements.txt` faisait payer les 30 Mo sans rien
+rendre en échange, et rendait ce paragraphe faux en pratique.
+`tests/test_dependencies.py` verrouille le refus.
 
 **Deux décisions de conception à savoir justifier :**
 
@@ -630,7 +648,7 @@ Dans l'ordre, depuis la racine du projet, environnement virtuel activé :
 ```bash
 pip install -r requirements.txt   # 1. dépendances (une fois)
 python download_models.py         # 2. poids YOLO dans models/ (une fois)
-pytest -q                         # 3. vérification : 238 tests, < 5 s
+pytest -q                         # 3. vérification : 366 tests, < 5 s
 streamlit run app.py              # 4. interface (complète à partir de l'étape 7)
 ```
 
@@ -676,6 +694,23 @@ multiplie à la fois les seuils de déclenchement et les délais de garde de
 Puis « Lancer l'analyse » : la vidéo annotée défile en direct, les incidents
 s'accumulent dans le tableau, chacun avec son brouillon de rapport, sa preuve
 visuelle et les exports PDF et CSV.
+
+**Deux documents, deux questions.** Le rapport d'**incident** répond à « que
+s'est-il passé à 21 h 47 ? » : un incident, son constat, ses éléments techniques,
+son score de priorité et sa justification, sa preuve visuelle. Le rapport de
+**session** répond à celle d'un chef de poste en fin de service : « que s'est-il
+passé pendant la surveillance, et par quoi dois-je commencer ? » — les incidents
+triés par priorité, puis la chronologie par tranches. Les deux s'exportent en PDF,
+la chronologie aussi en CSV. Le rapport de session s'affiche **même sans
+incident** : une surveillance calme est un résultat, et la chronologie le
+documente.
+
+**Webcam.** Un flux en direct n'a pas de fin : l'arrêt vient du garde-fou
+« Durée maximale analysée » de la barre latérale. Le temps affiché sous la vidéo
+indique alors « temps réel » et non « temps vidéo » — sur un fichier, `t` est
+reconstruit depuis le numéro d'image et l'analyse est reproductible ; en direct,
+`t` est l'heure écoulée. Savoir laquelle on lit importe avant de recopier une
+durée dans un rapport.
 
 **Thème.** Les couleurs de l'interface sont définies dans
 `.streamlit/config.toml` et reprises **telles quelles** des fichiers SVG de
@@ -737,9 +772,29 @@ ZONES = (
 | 7 | `app.py` — interface Streamlit | ✅ fait |
 | 8 | Bonus : règle OBJET ABANDONNÉ | ✅ fait |
 | 9 | Bonus : `generate_with_llm()` avec repli | ✅ fait |
+| 10 | `source.py` — fichier / webcam / RTSP unifiés | ✅ fait |
+| 11 | Score de priorité — barème transparent et traçable | ✅ fait |
+| 12 | `timeline.py` + `session_report.py` — rapport à deux niveaux | ✅ fait |
 
-**Le cœur du projet est fonctionnel** : 238 tests, et la chaîne vidéo → suivi →
-zones → incidents → rapport PDF/CSV tourne de bout en bout.
+### 6.1 Assainissement — aligner le code sur ce que le README annonçait
+
+Les trois modules ci-dessus ont longtemps été **écrits, testés et jamais
+appelés** : 1 321 lignes que l'exécutable n'importait pas. Un module qu'aucun
+chemin d'exécution ne touche n'existe pas pour l'utilisateur, et un README qui
+le décrit annonce un produit qui n'est pas livré. Cette campagne l'a corrigé.
+
+| Phase | Correction | Pourquoi c'était un problème |
+|---|---|---|
+| A | Retrait de `supervision` | Le README argumentait son refus tout en la déclarant en dépendance dure : 30 Mo installés pour une fonction sans appelant. |
+| B | `VideoSource` branché dans `app.py` | L'interface refaisait la lecture vidéo à la main, en plus faible. En direct, `frame_index / fps` sous-estimait toutes les durées dès qu'une image était sautée — donc toutes les règles. |
+| C | Logique métier sortie d'`app.py` | Le fichier réécrivait les règles, validait la cadence contre deux constantes locales et rangeait les gravités dans son propre ordre, contre son propre docstring. |
+| D | `timeline.py` et `session_report.py` branchés | Le rapport à deux niveaux était documenté mais inaccessible. |
+| E | Score affiché dans le rapport d'incident | Le même incident portait « critique » à l'écran et aucune priorité sur le papier. |
+| F | Surface publique et documentation | `__all__` décrivait le projet tel qu'il était à l'étape 3. |
+
+**Le cœur du projet est fonctionnel** : 366 tests, et la chaîne source → suivi →
+zones → incidents → chronologie → rapports PDF/CSV tourne de bout en bout, sur
+fichier comme sur webcam.
 
 ---
 
@@ -784,8 +839,15 @@ ignore les angles morts est dangereux.
   autorisée : toute intrusion en zone restreinte est signalée de la même façon.
 
 **Limites d'ingénierie**
-- Traitement mono-flux, hors ligne. Ni multi-caméras, ni base de données, ni
-  authentification.
+- **Une source à la fois.** Fichier, webcam ou flux RTSP, mais un seul. Ni
+  multi-caméras, ni ONVIF, ni base de données, ni authentification, ni alertes
+  poussées — voir § 8.3 pour les raisons de cette exclusion.
+- En direct, la qualité dépend de la caméra et du réseau autant que du logiciel.
+  Une coupure brève est absorbée (`reconnect_attempts`), une coupure longue
+  interrompt la surveillance en conservant l'analyse déjà produite.
+- Si le traitement est plus lent que la caméra, des images sont **volontairement
+  écartées** pour rester sur le direct. L'interface le signale : c'est un
+  arbitrage assumé, pas une panne.
 - L'analyse d'une longue vidéo est plus lente que le temps réel sur CPU.
 - Le rapport est un **brouillon** ; sa validation par un humain est obligatoire.
 
@@ -808,7 +870,7 @@ comptage d'objets distincts par zone. Suivi détaillé au § 6.
 | Extension | Apport | Librairies |
 |---|---|---|
 | Enrichissement LLM du rapport | Rédaction en langage naturel **par-dessus** des faits déjà établis, avec repli automatique sur le gabarit | `anthropic` |
-| Franchissement de ligne virtuelle | Comptage entrée/sortie : raisonner en flux et plus seulement en présence | `supervision.LineZone` |
+| Franchissement de ligne virtuelle | Comptage entrée/sortie : raisonner en flux et plus seulement en présence | aucune — signe du produit vectoriel |
 | Jeu de validation + métriques | Chiffrer le taux de détection et les fausses alertes par heure de vidéo | `csv`, `pandas` |
 | Éditeur de zones dans l'interface | Redéfinir les polygones sans éditer `config.py` | `streamlit-drawable-canvas` |
 | Persistance SQLite | Historique des incidents entre deux sessions | `sqlite3` |
