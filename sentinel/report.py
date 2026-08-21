@@ -175,6 +175,16 @@ class ReportGenerator:
             "site_name": self.config.site_name,
             "operator": self.config.operator,
             "severity": event.severity.value,
+            # Le score est **lu**, jamais recalculé : il est établi par
+            # `EventEngine` et porté par l'incident. Le recomposer ici créerait
+            # une seconde source de vérité qui divergerait au premier ajustement
+            # du barème — et un rapport qui contredit le tableau à l'écran n'est
+            # plus opposable.
+            "priorite": event.priority.level.value if event.priority else "non calculée",
+            "score": f"{event.priority.value:.0f}" if event.priority else "-",
+            "justification": (
+                event.priority.explanation if event.priority else "score non calculé"
+            ),
             **event.details,
         }
 
@@ -200,6 +210,7 @@ class ReportGenerator:
             f"Date         : {context['date']} à {context['heure']}",
             f"Type         : {event.event_type.value}",
             f"Gravité      : {event.severity.value}",
+            f"Priorité     : {context['priorite']} ({context['score']} pts)",
             "",
             "CONSTAT",
             "-" * 68,
@@ -214,6 +225,7 @@ class ReportGenerator:
             f"Temps vidéo        : {event.video_time:.2f} s",
             f"Boîte englobante   : {tuple(round(v) for v in event.bbox)}",
             f"Preuve visuelle    : {event.evidence_path or 'non disponible'}",
+            f"Calcul du score    : {context['justification']}",
         ]
 
         for key, value in event.details.items():
@@ -386,6 +398,11 @@ class ReportGenerator:
             f"Confiance : {event.confidence:.1%}",
             f"Temps vidéo : {event.video_time:.2f} s",
         ]
+        # Le détail du calcul suit le score partout où le score apparaît : c'est
+        # ce qui permet à un relecteur de refaire l'addition à la main, donc ce
+        # qui rend le classement contestable — et par là défendable.
+        if event.priority is not None:
+            facts.insert(0, f"Priorité : {event.priority.explanation}")
         for fact in facts:
             _write(pdf, 5, fact)
         pdf.ln(2)
