@@ -270,6 +270,16 @@ class VideoSource:
         return self.kind.is_live
 
     @property
+    def label(self) -> str:
+        """Désignation lisible de la source, **sans identifiants**.
+
+        Exposée publiquement parce qu'un rapport doit dire ce qu'il a analysé.
+        Un rapport se transmet : le mot de passe d'une URL RTSP ne doit y figurer
+        ni en clair, ni dans les journaux.
+        """
+        return self._describe_target()
+
+    @property
     def fps(self) -> float:
         """Cadence de la source, en images par seconde."""
         return self._fps

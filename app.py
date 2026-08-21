@@ -20,7 +20,7 @@ import tempfile
 from dataclasses import replace
 from html import escape
 from pathlib import Path
-from typing import Final
+from typing import Final, NamedTuple
 
 import cv2
 import streamlit as st
@@ -30,7 +30,9 @@ from sentinel.detector import Detector
 from sentinel.events import Event, EventEngine
 from sentinel.exceptions import ModelLoadError, SentinelError, SourceDisconnectedError
 from sentinel.report import ReportGenerator
+from sentinel.session_report import SessionReportGenerator
 from sentinel.source import VideoSource, detect_kind
+from sentinel.timeline import SessionContext, Timeline
 from sentinel.tracker import Tracker
 from sentinel.zones import ZoneManager
 
@@ -324,25 +326,50 @@ def load_detector(weights: str) -> Detector:
     return Detector(weights=weights)
 
 
-def build_pipeline(
-    weights: str,
-    settings: dict[str, object],
-) -> tuple[Detector, Tracker, ZoneManager, EventEngine, ReportGenerator]:
+class Pipeline(NamedTuple):
+    """Les composants d'une analyse, assemblés pour une session.
+
+    Un tuple nommé plutôt qu'un tuple anonyme : `pipeline[4]` ne dit pas ce
+    qu'il désigne, et l'ordre finit toujours par changer.
+
+    Attributes:
+        detector: Perception — frame vers détections.
+        tracker: Mémoire temporelle des objets suivis.
+        zones: Géométrie — appartenance aux polygones.
+        events: Moteur de règles.
+        generator: Générateur de rapports, d'incident **et** de session.
+        timeline: Chronologie alimentée au fil de l'analyse.
+    """
+
+    detector: Detector
+    tracker: Tracker
+    zones: ZoneManager
+    events: EventEngine
+    generator: SessionReportGenerator
+    timeline: Timeline
+
+
+def build_pipeline(weights: str, settings: dict[str, object]) -> Pipeline:
     """Assemble les composants du pipeline pour une analyse.
 
     **Volontairement non mis en cache**, contrairement au détecteur. `Tracker`,
-    `ZoneManager` et `EventEngine` portent l'état d'une analyse : identifiants
-    attribués, chronomètres de zone, historique d'incidents. Les conserver d'un
-    rerun à l'autre ferait démarrer une nouvelle vidéo avec la mémoire de la
-    précédente. Leur construction est de toute façon gratuite — seuls les 6 à
-    50 Mo de poids YOLO méritaient un cache, et `load_detector` s'en charge.
+    `ZoneManager`, `EventEngine` et `Timeline` portent l'état d'une analyse :
+    identifiants attribués, chronomètres de zone, historique d'incidents, faits
+    marquants. Les conserver d'un rerun à l'autre ferait démarrer une nouvelle
+    vidéo avec la mémoire de la précédente. Leur construction est de toute façon
+    gratuite — seuls les 6 à 50 Mo de poids YOLO méritaient un cache, et
+    `load_detector` s'en charge.
+
+    Le générateur est un `SessionReportGenerator` : il hérite de
+    `ReportGenerator`, donc les rapports d'incident isolés sont inchangés, et il
+    sait en plus assembler le rapport de session à deux niveaux.
 
     Args:
         weights: Chemin du modèle sélectionné.
         settings: Réglages issus de `render_sidebar()`.
 
     Returns:
-        Le quintuplet `(detector, tracker, zone_manager, event_engine, report_generator)`.
+        Les composants prêts à l'emploi.
 
     Raises:
         SentinelError: Si un composant ne peut pas être initialisé.
@@ -355,9 +382,48 @@ def build_pipeline(
     tracker = Tracker(detector)
     zone_manager = ZoneManager()
     event_engine = EventEngine(zone_manager, rules=scaled_rules(settings))
-    generator = ReportGenerator()
 
-    return detector, tracker, zone_manager, event_engine, generator
+    return Pipeline(
+        detector=detector,
+        tracker=tracker,
+        zones=zone_manager,
+        events=event_engine,
+        generator=SessionReportGenerator(),
+        timeline=Timeline(),
+    )
+
+
+def session_context(source: VideoSource, settings: dict[str, object]) -> SessionContext:
+    """Décrit la session pour l'en-tête du rapport.
+
+    Un rapport qui ne dit pas avec quels réglages il a été produit n'est pas
+    vérifiable : le même quai filmé à 25 % de seuil de confiance et à 75 % ne
+    donne pas les mêmes incidents.
+
+    Args:
+        source: Source analysée.
+        settings: Réglages de la session.
+
+    Returns:
+        Le contexte, **sans identifiant de connexion** — `VideoSource.label`
+        masque le mot de passe des URL RTSP, et un rapport se transmet.
+    """
+    modele = next(
+        (
+            label
+            for label, chemin in config.AVAILABLE_MODELS.items()
+            if str(chemin) == str(settings.get("weights"))
+        ),
+        "-",
+    )
+    return SessionContext(
+        source_label=source.label,
+        is_live=source.is_live,
+        model_label=modele,
+        confidence=float(settings["confidence"]),
+        watched_classes=tuple(settings.get("classes") or ()),
+        duration_factor=float(settings.get("min_duration_factor", 1.0)),
+    )
 
 
 def scaled_rules(settings: dict[str, object]) -> tuple[config.EventRule, ...]:
@@ -867,7 +933,10 @@ def process_video(source: VideoSource, settings: dict[str, object], pipeline) ->
     Raises:
         VideoSourceError: Si la source ne peut pas être ouverte.
     """
-    _, tracker, zone_manager, event_engine, _ = pipeline
+    tracker = pipeline.tracker
+    zone_manager = pipeline.zones
+    event_engine = pipeline.events
+    timeline = pipeline.timeline
 
     stride = max(1, int(settings["frame_stride"]))
     max_seconds = float(settings["max_seconds"])
@@ -921,6 +990,15 @@ def process_video(source: VideoSource, settings: dict[str, object], pipeline) ->
                 )
                 if events:
                     st.session_state["events"].extend(events)
+
+                # La chronologie observe les objets **retenus** par le tracker,
+                # pas ceux vus sur cette seule frame : la rétention absorbe déjà
+                # les occlusions courtes. Lui passer les objets de la frame
+                # produirait une fausse sortie puis une fausse entrée à chaque
+                # fois qu'un objet passe derrière un poteau.
+                timeline.observe(
+                    tracker.video_time, tracker.active(), events, frame.wall_time
+                )
 
                 image_slot.image(
                     annotate(image, zone_manager, objects, settings),
@@ -1230,6 +1308,134 @@ def _render_exports(event: Event, events: list[Event], generator: ReportGenerato
         st.error(f"Export impossible : {exc}")
 
 
+def render_session_report(
+    events: list[Event],
+    timeline: Timeline,
+    context: SessionContext | None,
+    generator: SessionReportGenerator,
+) -> None:
+    """Affiche le rapport de session à deux niveaux et ses exports.
+
+    **Pourquoi deux ordres de lecture.** La partie 1 trie les incidents par
+    score décroissant : c'est la liste d'action, le premier de la liste est celui
+    à regarder en premier. La partie 2 rejoue le déroulé par tranches de temps
+    vidéo : c'est la mise en récit. Trier par priorité fait perdre la causalité,
+    trier par temps fait perdre l'urgence — un sac abandonné se comprend en
+    voyant qui l'a posé trois tranches plus tôt, savoir par où commencer demande
+    l'ordre inverse.
+
+    Rien ici ne suppose que la session est close : `Timeline` s'alimente au fil
+    de l'eau et se consulte à tout moment. Le rapport reflète l'état à son
+    instant d'édition, ce qui rendra possible l'export en pleine surveillance.
+
+    Args:
+        events: Incidents de la session.
+        timeline: Chronologie observée pendant l'analyse.
+        context: Réglages de la session, pour l'en-tête.
+        generator: Générateur de rapports de session.
+    """
+    st.subheader("Rapport de session")
+    st.caption(
+        f"Deux lectures des mêmes faits : les incidents **par priorité**, puis le "
+        f"déroulé **par tranches de {config.TIMELINE.slice_seconds:.0f} s** de temps "
+        "vidéo. Les tranches sans changement ne sont pas listées."
+    )
+
+    try:
+        texte = generator.generate_session_report(events, timeline, context)
+    except SentinelError as exc:
+        st.error(f"Rapport de session indisponible : {exc}")
+        return
+
+    st.text_area("Brouillon de rapport de session", value=texte, height=420)
+
+    pdf_column, csv_column, info_column = st.columns([1, 1, 2])
+
+    try:
+        nom_pdf, donnees_pdf = _session_pdf(
+            tuple(item.event_id for item in events), len(timeline), events, timeline, context, generator
+        )
+        with pdf_column:
+            st.download_button(
+                "Rapport de session (PDF)",
+                data=donnees_pdf,
+                file_name=nom_pdf,
+                mime="application/pdf",
+                type="primary",
+            )
+    except SentinelError as exc:
+        with pdf_column:
+            st.warning(f"PDF indisponible : {exc}", icon="⚠")
+
+    try:
+        nom_csv, donnees_csv = _timeline_csv(len(timeline), timeline, generator)
+        with csv_column:
+            st.download_button(
+                "Chronologie (CSV)",
+                data=donnees_csv,
+                file_name=nom_csv,
+                mime="text/csv",
+            )
+    except SentinelError:
+        with csv_column:
+            st.caption("Chronologie vide : rien à exporter.")
+
+    with info_column:
+        tranches = timeline.slices()
+        st.caption(
+            f"{len(timeline)} fait(s) marquant(s) sur {len(tranches)} tranche(s) "
+            f"retenue(s) · {len(events)} incident(s)."
+        )
+
+
+@st.cache_data(show_spinner=False)
+def _session_pdf(
+    event_ids: tuple[str, ...],
+    fact_count: int,
+    _events: list[Event],
+    _timeline: Timeline,
+    _context: SessionContext | None,
+    _generator: SessionReportGenerator,
+) -> tuple[str, bytes]:
+    """Produit le PDF de session, une fois par état de session.
+
+    La clé de cache est le couple *(identifiants d'incidents, nombre de faits)* :
+    ce sont les deux seules choses qui font changer le document. Sans cette
+    mémoïsation, chaque filtre déplacé réécrirait le PDF sur le disque.
+
+    Args:
+        event_ids: Identifiants des incidents — première moitié de la clé.
+        fact_count: Nombre de faits de la chronologie — seconde moitié.
+        _events: Incidents à décrire.
+        _timeline: Chronologie à rejouer.
+        _context: Réglages de la session.
+        _generator: Générateur de rapports de session.
+
+    Returns:
+        Le couple `(nom_de_fichier, contenu)`.
+    """
+    chemin = _generator.export_session_pdf(_events, _timeline, _context)
+    return chemin.name, chemin.read_bytes()
+
+
+@st.cache_data(show_spinner=False)
+def _timeline_csv(
+    fact_count: int, _timeline: Timeline, _generator: SessionReportGenerator
+) -> tuple[str, bytes]:
+    """Produit le CSV de la chronologie, une fois par état de chronologie.
+
+    Args:
+        fact_count: Nombre de faits — la clé de cache.
+        _timeline: Chronologie à exporter.
+        _generator: Générateur de rapports de session.
+
+    Returns:
+        Le couple `(nom_de_fichier, contenu)`.
+    """
+    chemin = _generator.export_timeline_csv(_timeline)
+    return chemin.name, chemin.read_bytes()
+
+
 # ---------------------------------------------------------------------------
 # Point d'entrée
 # ---------------------------------------------------------------------------
@@ -1286,8 +1492,14 @@ def main() -> None:
             try:
                 pipeline = build_pipeline(str(settings["weights"]), settings)
                 st.session_state["events"] = []
-                process_video(open_source(source, settings), settings, pipeline)
-                st.session_state["generator"] = pipeline[4]
+                flux = open_source(source, settings)
+                process_video(flux, settings, pipeline)
+                # La chronologie et le contexte survivent à la boucle : c'est ce
+                # qui permet de rééditer le rapport de session à chaque rerun
+                # sans relancer l'analyse.
+                st.session_state["generator"] = pipeline.generator
+                st.session_state["timeline"] = pipeline.timeline
+                st.session_state["context"] = session_context(flux, settings)
                 events = st.session_state["events"]
                 st.success(
                     f"Analyse terminée : {len(events)} incident(s) détecté(s).",
@@ -1310,10 +1522,20 @@ def main() -> None:
         unsafe_allow_html=True,
     )
     render_incident_table(events)
+
+    generator = st.session_state.get("generator") or SessionReportGenerator()
     if events:
         st.divider()
-        render_incident_detail(
-            events, st.session_state.get("generator") or ReportGenerator()
+        render_incident_detail(events, generator)
+
+    # Le rapport de session tient debout sans incident : une surveillance calme
+    # est un résultat, et la chronologie le documente. Il ne s'affiche donc pas
+    # « s'il y a des incidents » mais « si une analyse a eu lieu ».
+    timeline = st.session_state.get("timeline")
+    if timeline is not None and isinstance(generator, SessionReportGenerator):
+        st.divider()
+        render_session_report(
+            events, timeline, st.session_state.get("context"), generator
         )
 
 
