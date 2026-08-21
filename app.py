@@ -29,6 +29,7 @@ import config
 from sentinel.detector import Detector
 from sentinel.events import Event, EventEngine
 from sentinel.exceptions import ModelLoadError, SentinelError, SourceDisconnectedError
+from sentinel.crossing import LineCounter
 from sentinel.report import ReportGenerator
 from sentinel.session_report import SessionReportGenerator
 from sentinel.source import VideoSource, detect_kind
@@ -339,6 +340,8 @@ class Pipeline(NamedTuple):
         events: Moteur de règles.
         generator: Générateur de rapports, d'incident **et** de session.
         timeline: Chronologie alimentée au fil de l'analyse.
+        lines: Compteur de franchissements. Inerte tant que
+            `config.CROSSING_LINES` est vide, ce qui est le cas par défaut.
     """
 
     detector: Detector
@@ -347,6 +350,7 @@ class Pipeline(NamedTuple):
     events: EventEngine
     generator: SessionReportGenerator
     timeline: Timeline
+    lines: LineCounter
 
 
 def build_pipeline(weights: str, settings: dict[str, object]) -> Pipeline:
@@ -390,6 +394,7 @@ def build_pipeline(weights: str, settings: dict[str, object]) -> Pipeline:
         events=event_engine,
         generator=SessionReportGenerator(),
         timeline=Timeline(),
+        lines=LineCounter(),
     )
 
 
@@ -937,6 +942,7 @@ def process_video(source: VideoSource, settings: dict[str, object], pipeline) ->
     zone_manager = pipeline.zones
     event_engine = pipeline.events
     timeline = pipeline.timeline
+    lines = pipeline.lines
 
     stride = max(1, int(settings["frame_stride"]))
     max_seconds = float(settings["max_seconds"])
@@ -970,6 +976,8 @@ def process_video(source: VideoSource, settings: dict[str, object], pipeline) ->
 
                 if not zone_manager.is_initialized:
                     zone_manager.initialize(image.shape)
+                if not lines.is_initialized:
+                    lines.initialize(image.shape)
 
                 # `video_time` est **imposé** par la source : c'est le seul moyen
                 # de rester juste en direct, où le compteur d'images ne mesure
@@ -998,6 +1006,7 @@ def process_video(source: VideoSource, settings: dict[str, object], pipeline) ->
                     objects, tracker, image, tracker.video_time, frame.wall_time
                 )
                 nouvelles = event_engine.occupancy.changes(notable_only=True)[avant:]
+                passages = lines.update(tracker.active(), tracker.video_time)
                 if events:
                     st.session_state["events"].extend(events)
 
@@ -1012,6 +1021,7 @@ def process_video(source: VideoSource, settings: dict[str, object], pipeline) ->
                     events,
                     frame.wall_time,
                     occupancy_changes=nouvelles,
+                    crossings=passages,
                 )
 
                 image_slot.image(

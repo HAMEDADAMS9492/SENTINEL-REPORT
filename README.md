@@ -486,6 +486,44 @@ personnes en zone X pendant T secondes », seuil surchargeable par
 `SurveillanceZone.min_occupancy`) et les transitions de la chronologie
 (« hall : 2 → 7 personnes »).
 
+### 3.4 ter Franchissement de ligne (`crossing.py`)
+
+Une zone répond à « **où** est cet objet ? », une ligne à « **qu'a-t-il fait** ? ».
+La première décrit un état, la seconde un événement. C'est pourquoi `CrossingLine`
+est une structure séparée de `SurveillanceZone` : une ligne a deux points, pas de
+surface, pas de durée de séjour, pas de seuil d'occupation. En faire un type de
+zone aurait produit une structure dont la moitié des champs est inapplicable
+selon la valeur d'un autre champ. Une zone de type `COUNTING` référence sa ligne
+**par son nom**.
+
+**L'algorithme.** Le côté d'un point `P` par rapport à une droite `AB` est donné
+par le signe du produit vectoriel `(B−A) × (P−A)`. Un objet a franchi la ligne
+entre deux frames si ce signe **a changé**, et le nouveau signe donne le sens.
+
+**Le piège.** Un changement de signe ne suffit pas : le produit vectoriel décrit
+une droite **infinie**, pas un segment. Sans second test, un objet passant dix
+mètres au-delà de l'extrémité de la ligne serait compté comme l'ayant franchie.
+On vérifie donc que les deux segments — la ligne, et le déplacement de l'objet —
+se coupent réellement, par le test d'orientation classique : quatre produits
+vectoriels, aucune division, aucun cas dégénéré à traiter à part. L'erreur est
+silencieuse quand on l'oublie : les chiffres restent plausibles, ils sont
+seulement faux.
+
+**Aucune librairie.** `supervision.LineZone` rendrait le même service au prix
+d'une dépendance de ~30 Mo, refusée ailleurs dans ce projet pour la même raison
+(§ 3.3). On ne paie pas 30 Mo pour quatre soustractions et deux multiplications.
+
+**Convention de sens.** Pour une ligne tracée de gauche à droite, le sens positif
+va vers le **bas** de l'image — l'origine des coordonnées image est en haut à
+gauche. Quand cela ne tombe pas dans le bon sens sur la scène filmée, on inverse
+`start` et `end` plutôt que d'échanger les libellés. Ceux-ci sont d'ailleurs des
+réglages : « entrée / sortie » pour une porte, « montée / descente » pour un
+escalier. Un rapport qui parle la langue du site se relit sans traduction.
+
+**Aucune ligne n'est configurée par défaut.** Le comptage de flux suppose de
+connaître la scène ; en déclarer une « au cas où » ferait apparaître des chiffres
+que personne n'a demandés dans tous les rapports.
+
 ### 3.5 Seuils relatifs — corriger la perspective sans calibration
 
 Un seuil exprimé en pixels n'a pas le même sens partout dans l'image. Un

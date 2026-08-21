@@ -66,6 +66,7 @@ def test_the_pipeline_names_its_components() -> None:
         "events",
         "generator",
         "timeline",
+        "lines",
     )
 
 

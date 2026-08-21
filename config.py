@@ -605,6 +605,76 @@ class GeometryConfig:
 GEOMETRY: Final[GeometryConfig] = GeometryConfig()
 
 
+@dataclass(frozen=True)
+class CrossingLine:
+    """Une ligne virtuelle dont on compte les franchissements.
+
+    Pourquoi une structure séparée de `SurveillanceZone`
+    -----------------------------------------------------
+    Une ligne a deux points, pas de surface, pas de durée de séjour, pas de
+    seuil d'occupation. En faire un type de zone aurait produit une structure
+    dont la moitié des champs est inapplicable selon la valeur d'un autre champ —
+    exactement le défaut que le typage des zones cherchait à supprimer.
+
+    La différence est aussi de nature : une zone répond à « **où** est cet
+    objet ? », une ligne à « **qu'a-t-il fait** ? ». La première décrit un état,
+    la seconde un événement. Une zone de type `COUNTING` référence sa ligne par
+    son nom (`SurveillanceZone.crossing_line`).
+
+    Nommer les deux sens
+    ---------------------
+    « Entrée » et « sortie » conviennent à une porte ; « montée » et « descente »
+    à un escalier ; « aller » et « retour » à un couloir. Les libellés sont donc
+    des réglages, et ils sont repris tels quels dans le rapport — un document qui
+    parle la langue du site se relit sans traduction.
+
+    Le sens positif est celui du produit vectoriel `(end − start) × (P − start)`
+    positif. Concrètement, pour une ligne tracée **de gauche à droite**, le sens
+    positif est celui qui va vers le **bas de l'image** — les coordonnées image
+    ont leur origine en haut à gauche et leur axe y dirigé vers le bas.
+
+    Inverser `start` et `end` inverse les deux libellés. C'est le réglage à
+    utiliser quand la convention ne tombe pas dans le bon sens sur la scène
+    filmée : plus simple, et plus lisible, que d'échanger les libellés.
+
+    Attributes:
+        name: Identifiant lisible, réutilisé dans les rapports. Sert de clé.
+        start: Première extrémité, en coordonnées normalisées [0, 1].
+        end: Seconde extrémité, en coordonnées normalisées.
+        positive_label: Nom du sens positif.
+        negative_label: Nom du sens inverse.
+        classes: Classes comptées. Tuple vide = toutes les classes surveillées.
+        color: Couleur d'affichage BGR.
+    """
+
+    name: str
+    start: tuple[float, float]
+    end: tuple[float, float]
+    positive_label: str = "entrée"
+    negative_label: str = "sortie"
+    classes: tuple[str, ...] = ()
+    color: tuple[int, int, int] = (255, 180, 0)
+
+
+# Aucune ligne par défaut : le comptage de flux est un usage à part, qui suppose
+# de connaître la scène. En déclarer une « au cas où » ferait apparaître des
+# chiffres que personne n'a demandés dans tous les rapports.
+#
+# Exemple de configuration, à adapter à la scène filmée :
+#
+#     CROSSING_LINES = (
+#         CrossingLine(
+#             name="Porte principale",
+#             start=(0.30, 0.80),
+#             end=(0.70, 0.80),
+#             positive_label="entrée",
+#             negative_label="sortie",
+#             classes=("person",),
+#         ),
+#     )
+CROSSING_LINES: Final[tuple[CrossingLine, ...]] = ()
+
+
 # ---------------------------------------------------------------------------
 # 6. Règles d'événements (events.py)
 # ---------------------------------------------------------------------------

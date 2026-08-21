@@ -43,6 +43,7 @@ from sentinel.detector import Detector
 from sentinel.tracker import TrackedObject, Tracker
 from sentinel.zones import ZoneManager
 from sentinel.occupancy import OccupancyChange, ZoneOccupancy
+from sentinel.crossing import LineCounter, LineCrossing
 from sentinel.events import Event, EventEngine, PriorityScore
 from sentinel.timeline import SessionContext, Timeline, TimelineFact, TimelineSlice
 from sentinel.report import ReportGenerator
@@ -62,9 +63,11 @@ __all__ = [
     "Tracker",
     # Géométrie
     "ZoneManager",
-    # Occupation
+    # Occupation et flux
     "OccupancyChange",
     "ZoneOccupancy",
+    "LineCounter",
+    "LineCrossing",
     # Règles métier
     "Event",
     "EventEngine",
