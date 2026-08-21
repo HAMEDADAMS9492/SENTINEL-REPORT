@@ -524,6 +524,40 @@ escalier. Un rapport qui parle la langue du site se relit sans traduction.
 connaître la scène ; en déclarer une « au cas où » ferait apparaître des chiffres
 que personne n'a demandés dans tous les rapports.
 
+### 3.4 quater Ré-association des pistes perdues (`reidentification.py`)
+
+**Optionnelle et désactivée par défaut.** Au-delà de `TRACKING.max_age_s`, une
+piste est purgée et l'objet qui réapparaît reçoit un nouvel identifiant : son
+chronomètre repart à zéro. Une personne qui rôde depuis cinquante secondes et
+passe cinq secondes derrière un camion redevient « vue à l'instant ».
+
+Le remède a pourtant un mode de panne pire que la maladie — voir § 7. D'où deux
+décisions : **le doute vaut refus**, et l'activation est un choix d'exploitation.
+
+**Trois conditions cumulées, et pourquoi aucune ne suffit seule.**
+
+| Condition | Ce qu'elle écarte | Sa faiblesse |
+|---|---|---|
+| Position prédite (`dernière position + vitesse × temps`) | les candidats de l'autre bout de l'image | deux personnes marchant côte à côte la satisfont toutes deux |
+| Taille apparente | le passant du premier plan confondu avec la silhouette du fond | deux personnes à la même distance ont la même taille |
+| Histogramme de couleur HSV (`cv2.calcHist`) | deux personnes également placées et également grandes | un changement d'éclairage la fait chuter |
+
+La troisième est la seule qui porte sur l'**apparence**, et donc la seule qui
+tranche les deux premières ; elle est aussi la plus fragile, d'où son emploi en
+confirmation d'un candidat déjà retenu géométriquement, jamais seule. L'espace
+HSV plutôt que BGR parce que la teinte résiste bien mieux aux variations
+d'éclairage que l'intensité.
+
+**Ce qui vaut refus** : pas d'image (la condition d'apparence serait
+invérifiable, et une condition non vérifiée n'est pas une condition remplie),
+une région trop petite pour qu'un histogramme ait un sens, une classe
+différente, un écart de temps hors de [3 s, 15 s], et surtout **deux candidats
+également plausibles** — c'est exactement la situation où une erreur fusionnerait
+deux personnes.
+
+**Aucune dépendance** : `cv2.calcHist` et `cv2.compareHist` font partie
+d'OpenCV, déjà obligatoire.
+
 ### 3.5 Seuils relatifs — corriger la perspective sans calibration
 
 Un seuil exprimé en pixels n'a pas le même sens partout dans l'image. Un
@@ -1037,6 +1071,15 @@ ignore les angles morts est dangereux.
   visuelle. Dans une foule dense, des échanges d'identité restent possibles, et
   un objet occulté longtemps réapparaît sous un nouvel identifiant — son
   chronomètre repart à zéro.
+- Une ré-association optionnelle (`config.REID`, **désactivée par défaut**) vise
+  les occlusions de 3 à 15 secondes : un poteau, un camion qui passe. Elle est
+  désactivée parce que **son mode de panne est pire que le problème qu'elle
+  résout**. Un chronomètre remis à zéro fait manquer un incident : faux négatif,
+  visible et corrigeable. Une ré-association erronée fusionne deux personnes en
+  une seule piste, et le rapport affirme qu'une personne est restée quarante
+  minutes là où deux se sont succédé — un document présenté comme opposable
+  énonce alors un fait faux. Entre manquer un incident et en fabriquer un, un
+  système de sécurité choisit le premier. Voir § 3.4 quater.
 - Aucune ré-identification entre caméras ou entre sessions.
 
 **Limites du raisonnement**

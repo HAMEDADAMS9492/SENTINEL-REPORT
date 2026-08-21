@@ -264,6 +264,69 @@ class TrackingConfig:
 TRACKING: Final[TrackingConfig] = TrackingConfig()
 
 
+@dataclass(frozen=True)
+class ReidConfig:
+    """Ré-association des pistes perdues (`reidentification.py`).
+
+    Pourquoi `enabled` vaut False
+    ------------------------------
+    Cette fonctionnalité contredit une limite que le projet revendique — ByteTrack
+    n'utilise pas l'apparence — et, surtout, **son mode de panne est pire que le
+    problème qu'elle résout**. Un chronomètre remis à zéro fait manquer un
+    incident : c'est un faux négatif, visible et corrigeable. Une ré-association
+    erronée fusionne deux personnes en une seule piste, et le rapport affirme
+    alors qu'une personne est restée quarante minutes là où deux se sont
+    succédé — un document présenté comme opposable énonce un fait faux.
+
+    Entre manquer un incident et en fabriquer un, un système de sécurité choisit
+    le premier. L'activation est donc un choix d'exploitation, pris en
+    connaissance du compromis, jamais un comportement subi.
+
+    Périmètre visé
+    ---------------
+    Les occlusions de 3 à 15 secondes : un poteau, un camion qui passe, un angle
+    mort. La foule dense n'est **pas** visée et ne le sera pas par cette méthode.
+
+    Attributes:
+        enabled: Active la ré-association.
+        min_gap_s: Écart minimal depuis la disparition. En dessous, la rétention
+            normale du tracker suffit — inutile de doubler un mécanisme qui
+            fonctionne.
+        max_gap_s: Écart maximal. Au-delà, la prédiction de position n'a plus de
+            sens et l'éclairage a pu changer.
+        max_distance_ratio: Écart toléré entre position prédite et position
+            observée, en multiple de la hauteur apparente. Relatif, comme tous
+            les seuils de distance du projet : 200 px sont un pas au premier plan
+            et une traversée au fond du champ.
+        max_scale_ratio: Rapport de tailles apparentes toléré, dans les deux
+            sens. Un objet ne change pas brutalement de profondeur.
+        min_similarity: Corrélation minimale entre histogrammes de couleur
+            [-1, 1]. C'est la seule condition qui porte sur l'apparence, donc la
+            seule qui distingue deux personnes également placées et également
+            grandes.
+        min_margin: Écart minimal de similarité entre le meilleur candidat et le
+            suivant. En dessous, deux pistes sont également plausibles : c'est
+            exactement la situation où une erreur fusionnerait deux personnes, et
+            on refuse plutôt que de départager au hasard.
+        histogram_bins: Nombre de classes (teinte, saturation) de l'histogramme.
+        min_patch_px: Côté minimal d'une région pour qu'une signature couleur ait
+            un sens. En dessous, l'histogramme est du bruit.
+    """
+
+    enabled: bool = False
+    min_gap_s: float = 3.0
+    max_gap_s: float = 15.0
+    max_distance_ratio: float = 1.5
+    max_scale_ratio: float = 1.4
+    min_similarity: float = 0.65
+    min_margin: float = 0.15
+    histogram_bins: tuple[int, int] = (30, 32)
+    min_patch_px: int = 12
+
+
+REID: Final[ReidConfig] = ReidConfig()
+
+
 # ---------------------------------------------------------------------------
 # 4. Vocabulaire des incidents (events.py)
 # ---------------------------------------------------------------------------

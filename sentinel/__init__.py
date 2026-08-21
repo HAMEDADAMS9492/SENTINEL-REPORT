@@ -41,6 +41,7 @@ from sentinel.exceptions import (
 from sentinel.source import Frame, VideoSource, detect_kind
 from sentinel.detector import Detector
 from sentinel.tracker import TrackedObject, Tracker
+from sentinel.reidentification import LostTrack, ReidentificationBuffer
 from sentinel.zones import ZoneManager
 from sentinel.occupancy import OccupancyChange, ZoneOccupancy
 from sentinel.crossing import LineCounter, LineCrossing
@@ -62,6 +63,8 @@ __all__ = [
     # Mémoire temporelle
     "TrackedObject",
     "Tracker",
+    "LostTrack",
+    "ReidentificationBuffer",
     # Géométrie
     "ZoneManager",
     # Occupation et flux

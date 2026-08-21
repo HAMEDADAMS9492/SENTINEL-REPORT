@@ -441,13 +441,18 @@ class Tracker:
         >>> objets = tracker.update(frame, frame_index=42, fps=25.0)
     """
 
-    def __init__(self, detector, *, max_age_s: float | None = None) -> None:
+    def __init__(
+        self, detector, *, max_age_s: float | None = None, reid=None
+    ) -> None:
         """Initialise la mémoire de suivi.
 
         Args:
             detector: Instance de `sentinel.detector.Detector`.
             max_age_s: Durée de rétention d'un objet non revu. `None` = valeur de
                 `config.TRACKING`.
+            reid: Tampon de ré-association
+                (`sentinel.reidentification.ReidentificationBuffer`). `None` = un
+                tampon neuf, inerte tant que `config.REID.enabled` est faux.
         """
         self._detector = detector
         self._max_age_s: float = (
@@ -456,6 +461,14 @@ class Tracker:
         self._objects: dict[int, TrackedObject] = {}
         self._untracked: list[Detection] = []
         self._video_time: float = 0.0
+
+        # Import différé : `reidentification` importe `Detection`, pas ce module,
+        # mais garder l'import local évite de charger OpenCV quand la
+        # fonctionnalité est désactivée — ce qui est le cas par défaut.
+        from sentinel.reidentification import ReidentificationBuffer
+
+        self._reid = ReidentificationBuffer() if reid is None else reid
+        self._frame = None
 
     def update(
         self,
@@ -495,6 +508,10 @@ class Tracker:
             # pas une seconde version locale qui pourrait en diverger.
             self._video_time = frame_index / config.VIDEO.credible_fps(fps)
         moment = wall_time or datetime.now()
+        # Mémorisée pour la signature couleur des pistes perdues. Le tracker ne
+        # dessine ni n'écrit rien : il garde seulement une référence.
+        self._frame = frame
+        self._reid.expire(self._video_time)
 
         detections = self._detector.track(frame)
 
@@ -512,7 +529,12 @@ class Tracker:
 
             existing = self._objects.get(track_id)
             if existing is None:
-                self._objects[track_id] = self._create(detection, moment)
+                retrouvee = self._reid.match(detection, self._video_time, frame)
+                self._objects[track_id] = (
+                    self._resurrect(retrouvee, detection, moment)
+                    if retrouvee is not None
+                    else self._create(detection, moment)
+                )
             else:
                 existing.update(detection, self._video_time, moment)
             seen.add(track_id)
@@ -552,6 +574,94 @@ class Tracker:
         obj._push_history(self._video_time, detection.anchor)
         return obj
 
+    def _remember_lost(self, obj: TrackedObject) -> None:
+        """Range une piste purgée dans le tampon de ré-association.
+
+        Args:
+            obj: Objet sur le point d'être oublié.
+        """
+        from sentinel.reidentification import LostTrack, colour_signature
+
+        if not self._reid.settings.enabled:
+            return
+
+        self._reid.remember(
+            LostTrack(
+                track_id=obj.track_id,
+                class_name=obj.class_name,
+                position=obj.position,
+                velocity=self._velocity(obj),
+                scale_px=obj.scale_px,
+                signature=colour_signature(self._frame, obj.detection.xyxy),
+                lost_at=self._video_time,
+                memory={
+                    "first_seen": obj.first_seen,
+                    "first_seen_wall": obj.first_seen_wall,
+                    "hits": obj.hits,
+                    "history": list(obj.history),
+                    "zones": set(obj.zones),
+                    "zone_entry_time": dict(obj.zone_entry_time),
+                    "last_event_time": dict(obj.last_event_time),
+                    "class_votes": Counter(obj.class_votes),
+                    "owner_votes": Counter(obj.owner_votes),
+                },
+            )
+        )
+
+    @staticmethod
+    def _velocity(obj: TrackedObject) -> tuple[float, float]:
+        """Vitesse moyenne récente d'un objet, en pixels par seconde.
+
+        Args:
+            obj: Objet suivi.
+
+        Returns:
+            Le couple `(dx, dy)`. `(0, 0)` si l'historique est trop court — une
+            vitesse inventée ferait prédire une position fausse, et la condition
+            de position deviendrait un tirage au sort.
+        """
+        if len(obj.history) < 2:
+            return (0.0, 0.0)
+        (t0, (x0, y0)), (t1, (x1, y1)) = obj.history[0], obj.history[-1]
+        duree = t1 - t0
+        if duree <= 0:
+            return (0.0, 0.0)
+        return ((x1 - x0) / duree, (y1 - y0) / duree)
+
+    def _resurrect(self, lost, detection: Detection, wall_time: datetime) -> TrackedObject:
+        """Reconstruit un objet suivi à partir d'une piste retrouvée.
+
+        C'est tout l'intérêt de la ré-association : la mémoire temporelle survit
+        à l'occlusion. Sans cette restauration, l'objet repartirait avec un
+        chronomètre à zéro et la règle de rôdage ne se déclencherait toujours pas.
+
+        Args:
+            lost: Piste retrouvée.
+            detection: Détection qui la prolonge.
+            wall_time: Horodatage réel.
+
+        Returns:
+            L'objet suivi, avec son passé.
+        """
+        memoire = lost.memory
+        obj = TrackedObject(
+            track_id=detection.track_id,
+            class_name=lost.class_name,
+            first_seen=float(memoire.get("first_seen", self._video_time)),
+            last_seen=self._video_time,
+            first_seen_wall=memoire.get("first_seen_wall", wall_time),
+            last_seen_wall=wall_time,
+            detection=detection,
+            hits=int(memoire.get("hits", 1)),
+        )
+        obj.history.extend(memoire.get("history", ()))
+        obj.zones |= set(memoire.get("zones", ()))
+        obj.zone_entry_time.update(memoire.get("zone_entry_time", {}))
+        obj.last_event_time.update(memoire.get("last_event_time", {}))
+        obj.class_votes.update(memoire.get("class_votes", {}))
+        obj.owner_votes.update(memoire.get("owner_votes", {}))
+        return obj
+
     def _purge(self) -> None:
         """Supprime les objets absents depuis plus de `max_age_s`."""
         # La rétention absorbe les occlusions courtes — sans elle, quelqu'un
@@ -565,6 +675,9 @@ class Tracker:
             if (self._video_time - obj.last_seen) > self._max_age_s
         ]
         for track_id in expired:
+            # Mémoriser AVANT d'oublier : c'est la dernière occasion de garder
+            # l'apparence et les chronomètres de la piste.
+            self._remember_lost(self._objects[track_id])
             del self._objects[track_id]
 
         if expired:
