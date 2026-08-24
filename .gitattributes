@@ -1,0 +1,27 @@
+# Fins de ligne.
+#
+# Le dépôt est édité sous Windows et déployé sous Linux. Sans cette règle, un
+# `Dockerfile` récupéré avec des CRLF fait échouer sa dernière instruction sur
+# un message incompréhensible (« /bin/sh: 1: streamlit: not found », le retour
+# chariot étant collé au nom de la commande). Le forcer en LF supprime toute une
+# classe de pannes qui n'apparaissent qu'à la construction, sur la machine
+# distante.
+
+* text=auto eol=lf
+
+Dockerfile      text eol=lf
+*.py            text eol=lf
+*.sh            text eol=lf
+*.toml          text eol=lf
+*.yaml          text eol=lf
+*.yml           text eol=lf
+*.json          text eol=lf
+*.md            text eol=lf
+*.html          text eol=lf
+*.txt           text eol=lf
+
+*.svg           text eol=lf
+*.pt            binary
+*.jpg           binary
+*.png           binary
+*.mp4           binary
