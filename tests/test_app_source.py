@@ -187,10 +187,19 @@ def test_opening_is_deferred_to_the_context_manager() -> None:
 
 
 class _SourceFactice:
-    """Source minimale : seule sa nature intéresse la ligne d'état."""
+    """Source minimale : la nature du flux et son état de cadence.
 
-    def __init__(self, *, is_live: bool) -> None:
+    La ligne d'état lit aussi l'initialisation et le retard : une doublure qui
+    les omettrait ferait passer un test que le vrai code ferait échouer.
+    """
+
+    def __init__(
+        self, *, is_live: bool, warming_up: bool = False, lag_s: float = 0.0
+    ) -> None:
         self.is_live = is_live
+        self.is_warming_up = warming_up
+        self.warmup_remaining = 12.0 if warming_up else 0.0
+        self.lag_s = lag_s
 
 
 class _TrackerFactice:

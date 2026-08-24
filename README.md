@@ -5,7 +5,7 @@ automatique d'un brouillon de rapport d'incident horodaté avec image de preuve.
 
 > **État : ÉTAPE 9 / 9 — le cœur fonctionnel est complet.** La chaîne vidéo →
 > détection → suivi → zones → règles → rapport PDF/CSV tourne de bout en bout,
-> couverte par 594 tests, validés sur Python 3.11 / Streamlit 1.44 et Python 3.14 / Streamlit 1.54. Voir « Avancement » et « Feuille de route » plus bas.
+> couverte par 625 tests, validés sur Python 3.11 / Streamlit 1.44 et Python 3.14 / Streamlit 1.54. Voir « Avancement » et « Feuille de route » plus bas.
 
 ---
 
@@ -66,7 +66,7 @@ SENTINEL REPORT/
 ├── data/videos/           # Vidéos de test
 ├── assets/                # Identité visuelle (logos, favicon)
 ├── models/                # Poids YOLO (déposés par download_models.py)
-└── tests/                 # 594 tests, sans modèle ni vidéo : logique métier,
+└── tests/                 # 625 tests, sans modèle ni vidéo : logique métier,
                            # invariants d'architecture, hygiène des dépendances
 ```
 
@@ -221,6 +221,65 @@ le mot de passe.
 > `cv2.VideoCapture` ne réapparaît dans l'interface — la régression serait
 > silencieuse, puisque l'analyse d'un fichier continuerait de marcher et que
 > seul le direct deviendrait faux.
+
+### 3.0 bis Analyse au rythme réel (mode par défaut)
+
+Sur un processeur, une inférence YOLO coûte 100 à 150 ms. Analyser **chaque**
+image d'une vidéo à 25 images/s demande donc trois à quatre fois sa durée : dix
+minutes de vidéo occupent une demi-heure, pendant laquelle l'opérateur regarde
+une image saccadée avancer au ralenti. Ce n'est exploitable ni pour surveiller,
+ni pour démontrer.
+
+Le mode temps réel applique au **fichier** la stratégie déjà employée sur un
+direct (§ 3.0) : écarter les images qu'on n'a pas eu le temps de traiter, en
+avançant dans le fichier jusqu'au point où l'horloge en est arrivée.
+
+**Ce que ça coûte, et ce que ça ne coûte pas.**
+
+| | Mode temps réel *(défaut)* | Mode exhaustif |
+|---|---|---|
+| Durée d'analyse | celle de la vidéo | 3 à 4 × la vidéo |
+| Temps métier (`video_time`) | **exact** | exact |
+| Images examinées | celles que la machine suit | toutes |
+| Deux analyses identiques ? | non | **oui** |
+| Usage | travail courant | pièce contradictoire |
+
+Le point qui rend ce compromis acceptable : **le temps métier reste exact**. Sur
+un fichier, `video_time` vaut `index / fps`, et `grab()` fait avancer l'index
+exactement comme `read()`. Une image lue après cent images sautées porte donc
+bien l'horodatage de la 101ᵉ. Toutes les durées — intrusion, rôdage, immobilité —
+restent justes, donc toutes les règles aussi. Ce qui est perdu n'est pas la
+mesure du temps, c'est l'exhaustivité de l'observation : une détection qui
+n'apparaît que sur une image isolée peut être manquée.
+
+Le mode exhaustif reste à un clic, dans la barre latérale. C'est celui à employer
+pour produire un document contradictoire, puisque lui seul garantit que deux
+analyses de la même vidéo donnent exactement le même résultat.
+
+**Deux calculs distincts, et pourquoi les confondre serait une fausse économie.**
+En direct, les images arrivent qu'on les traite ou non et s'accumulent dans le
+tampon du pilote : ce qui est en retard est ce qui est arrivé *depuis la dernière
+lecture*. Sur un fichier, rien ne s'accumule — le fichier attend — et le retard
+est **cumulé** depuis le début de l'analyse.
+
+**La fenêtre d'initialisation.** Les quinze premières secondes
+(`REALTIME.warmup_s`) ne comptent pas comme du retard. La première inférence est
+souvent dix fois plus lente que les suivantes : Ultralytics charge ses poids et
+importe ses dépendances au premier appel. Compter ce retard-là ferait jeter
+plusieurs centaines d'images d'un coup, et l'analyse démarrerait en sautant le
+début de la vidéo — précisément le moment où la scène s'établit.
+
+Le repère de rythme est donc posé à la **fin** de cette fenêtre, et l'interface y
+affiche un écran **INITIALISATION** : anneau tournant, barre indéterminée, compte
+à rebours. Une attente sans signe de vie se lit comme une panne. La barre est
+volontairement *indéterminée* — on ne connaît pas la durée réelle du chargement,
+et une barre de progression qui mentirait sur son avancement serait pire que pas
+de barre du tout.
+
+Un flux **en direct** n'est jamais gelé par cette fenêtre : laisser le tampon du
+pilote se remplir quinze secondes est exactement la panne que le module existe
+pour empêcher. Le démarrage à froid y coûte quelques images de plus — le bon prix
+pour une source qui ne se rejoue pas.
 
 ### 3.1 YOLO — détection d'objets en une passe (*one-stage*)
 
@@ -857,7 +916,7 @@ Dans l'ordre, depuis la racine du projet, environnement virtuel activé :
 ```bash
 pip install -r requirements.txt   # 1. dépendances (une fois)
 python download_models.py         # 2. poids YOLO dans models/ (une fois)
-pytest -q                         # 3. vérification : 594 tests, < 6 s
+pytest -q                         # 3. vérification : 625 tests, < 6 s
 streamlit run app.py              # 4. interface (complète à partir de l'étape 7)
 ```
 
@@ -891,7 +950,7 @@ paramètre lève `TypeError: '<=' not supported between instances of 'str' and
 | Modèle (nano / small / medium) | Source : fichier vidéo ou webcam |
 | Seuil de confiance | Catégories surveillées : personnes, véhicules, objets dangereux, sacs et bagages |
 | Facteur de durées de déclenchement | Ajout d'un objet précis parmi les 80 classes du modèle |
-| Cadence (une frame sur N, durée maximale) | |
+| Cadence : **analyse en temps réel**, une frame sur N, durée maximale | |
 | Affichage (confiance, identifiants de suivi) | |
 
 Un opérateur ajuste les curseurs de gauche **pendant** une analyse ; il ne
@@ -1038,7 +1097,7 @@ le décrit annonce un produit qui n'est pas livré. Cette campagne l'a corrigé.
 | E | Score affiché dans le rapport d'incident | Le même incident portait « critique » à l'écran et aucune priorité sur le papier. |
 | F | Surface publique et documentation | `__all__` décrivait le projet tel qu'il était à l'étape 3. |
 
-**Le cœur du projet est fonctionnel** : 594 tests, et la chaîne source → suivi →
+**Le cœur du projet est fonctionnel** : 625 tests, et la chaîne source → suivi →
 zones → incidents → chronologie → rapports PDF/CSV tourne de bout en bout, sur
 fichier comme sur webcam.
 
@@ -1103,7 +1162,9 @@ ignore les angles morts est dangereux.
 - Si le traitement est plus lent que la caméra, des images sont **volontairement
   écartées** pour rester sur le direct. L'interface le signale : c'est un
   arbitrage assumé, pas une panne.
-- L'analyse d'une longue vidéo est plus lente que le temps réel sur CPU.
+- En mode exhaustif, l'analyse d'une longue vidéo dure trois à quatre fois sa
+  durée sur CPU. Le mode temps réel — celui par défaut — tient la cadence en
+  écartant des images : les durées restent exactes, l'exhaustivité non.
 - Le rapport est un **brouillon** ; sa validation par un humain est obligatoire.
 
 ## 8. Feuille de route et extensions

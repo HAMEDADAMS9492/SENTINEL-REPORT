@@ -130,6 +130,7 @@ def test_regulators_live_in_the_sidebar(rendered: AppTest) -> None:
     assert "Durées de déclenchement" in sliders
     assert "Analyser une frame sur" in sliders
     assert [t.label for t in rendered.toggle] == [
+        "Analyse en temps réel",
         "Score de confiance",
         "Identifiants de suivi",
     ]

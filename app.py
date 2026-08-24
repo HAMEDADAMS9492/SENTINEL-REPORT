@@ -137,6 +137,80 @@ def inject_styles() -> None:
           }}
           .sr-subtitle {{ color: #64748B; font-size: 0.92rem; margin: 0; }}
 
+          /* Écran d'initialisation, affiché le temps que le modèle se charge
+             et que la cadence temps réel s'établisse. Une attente sans signe de
+             vie se lit comme une panne : l'anneau tourne, la barre défile, et le
+             compte à rebours dit combien de temps il reste. */
+          .sr-boot {{
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              justify-content: center;
+              gap: 14px;
+              min-height: 260px;
+              padding: 32px 24px;
+              border-radius: 14px;
+              border: 1px dashed #C7D3E3;
+              background: linear-gradient(135deg, #FFFFFF 0%, #EEF3F9 100%);
+          }}
+          .sr-boot-ring {{
+              width: 46px;
+              height: 46px;
+              border-radius: 50%;
+              border: 3px solid #D8E1EC;
+              border-top-color: {config.BRAND.steel_blue};
+              animation: sr-spin 0.9s linear infinite;
+          }}
+          @keyframes sr-spin {{ to {{ transform: rotate(360deg); }} }}
+
+          .sr-boot-text {{
+              color: {config.BRAND.anthracite};
+              font-size: 1.02rem;
+              font-weight: 800;
+              letter-spacing: 0.20em;
+              margin: 0;
+          }}
+          /* Les points sont animés en CSS plutôt que réécrits depuis Python :
+             réécrire le bloc dix fois par seconde ferait clignoter la page et
+             multiplierait les manipulations du DOM pendant la phase la plus
+             fragile de la session. */
+          .sr-boot-text::after {{
+              content: "";
+              animation: sr-dots 1.5s steps(1, end) infinite;
+          }}
+          @keyframes sr-dots {{
+              0%   {{ content: ""; }}
+              20%  {{ content: "."; }}
+              40%  {{ content: ".."; }}
+              60%  {{ content: "..."; }}
+              80%  {{ content: "...."; }}
+              100% {{ content: "....."; }}
+          }}
+
+          .sr-boot-track {{
+              width: min(320px, 70%);
+              height: 4px;
+              border-radius: 2px;
+              background: #DDE5EF;
+              overflow: hidden;
+          }}
+          .sr-boot-fill {{
+              width: 38%;
+              height: 100%;
+              border-radius: 2px;
+              background: {config.BRAND.steel_blue};
+              animation: sr-slide 1.25s ease-in-out infinite;
+          }}
+          /* Barre indéterminée : on ne connaît pas la durée réelle du
+             chargement, et une barre de progression qui mentirait sur son
+             avancement serait pire que pas de barre du tout. */
+          @keyframes sr-slide {{
+              0%   {{ transform: translateX(-100%); }}
+              100% {{ transform: translateX(320%); }}
+          }}
+
+          .sr-boot-hint {{ color: #64748B; font-size: 0.86rem; margin: 0; text-align: center; }}
+
           /* Intitulés de section, dans la page comme dans la barre latérale. */
           .sr-section {{
               text-transform: uppercase;
@@ -231,6 +305,34 @@ def _logo_card_html(path: Path) -> str:
     )
 
 
+def _boot_screen_html(title: str = "INITIALISATION", hint: str = "") -> str:
+    """Écran de chargement, en **un seul bloc HTML autonome**.
+
+    Même exigence que pour l'écrin du logo : ouvrir une balise dans un appel à
+    `st.markdown` et la fermer dans un autre laisse le DOM réel diverger de celui
+    que React croit gérer, et le premier réaffichage échoue sur
+    `NotFoundError: removeChild`. Le risque est ici maximal, puisque ce bloc est
+    précisément remplacé par la première image de la vidéo.
+
+    Args:
+        title: Texte principal, sans les points de suspension — ils sont animés
+            en CSS.
+        hint: Ligne d'explication sous la barre.
+
+    Returns:
+        Le fragment HTML complet.
+    """
+    ligne = f'<p class="sr-boot-hint">{escape(hint)}</p>' if hint else ""
+    return (
+        '<div class="sr-boot">'
+        '<div class="sr-boot-ring"></div>'
+        f'<p class="sr-boot-text">{escape(title)}</p>'
+        '<div class="sr-boot-track"><div class="sr-boot-fill"></div></div>'
+        f"{ligne}"
+        "</div>"
+    )
+
+
 def render_header() -> None:
     """Affiche l'en-tête de l'application avec le logo de marque.
 
@@ -297,7 +399,7 @@ def _warn_about_missing_assets() -> None:
 # ---------------------------------------------------------------------------
 
 
-@st.cache_resource(show_spinner="Chargement du modèle de détection...")
+@st.cache_resource(show_spinner=False)  # l'écran d'initialisation s'en charge
 def load_detector(weights: str) -> Detector:
     """Charge le détecteur correspondant à un fichier de poids **local**.
 
@@ -553,12 +655,27 @@ def render_sidebar() -> dict[str, object]:
 
     st.sidebar.divider()
     st.sidebar.markdown('<p class="sr-section">Cadence</p>', unsafe_allow_html=True)
+    settings["realtime"] = st.sidebar.toggle(
+        "Analyse en temps réel",
+        value=config.REALTIME.enabled,
+        help=(
+            "Tient le rythme de la vidéo en écartant les images que la machine "
+            "n'a pas le temps de traiter. Les **durées restent exactes** ; c'est "
+            "l'exhaustivité de l'observation qui est échangée contre la cadence. "
+            "Désactiver pour une analyse image par image, reproductible, mais "
+            "trois à quatre fois plus longue que la vidéo."
+        ),
+    )
     settings["frame_stride"] = st.sidebar.slider(
         "Analyser une frame sur",
         min_value=1,
         max_value=10,
         value=int(config.VIDEO.frame_stride),
-        help="Augmenter accélère l'analyse au prix de la précision temporelle.",
+        help=(
+            "Sous-échantillonnage **fixe**, appliqué avant toute chose. À "
+            "distinguer du temps réel, qui écarte des images selon la charge "
+            "réelle de la machine."
+        ),
     )
     settings["max_seconds"] = st.sidebar.slider(
         "Durée maximale analysée",
@@ -907,10 +1024,16 @@ def open_source(target: str | int, settings: dict[str, object]) -> VideoSource:
         La source, **non encore ouverte** : l'ouverture appartient au bloc
         `with` de `process_video`, qui garantit sa libération.
     """
-    return VideoSource(target, kind=detect_kind(target))
+    cadence = replace(config.REALTIME, enabled=bool(settings.get("realtime", True)))
+    return VideoSource(target, kind=detect_kind(target), realtime=cadence)
 
 
-def process_video(source: VideoSource, settings: dict[str, object], pipeline) -> None:
+def process_video(
+    source: VideoSource,
+    settings: dict[str, object],
+    pipeline,
+    boot_slot=None,
+) -> None:
     """Boucle principale : lit la source, exécute le pipeline, affiche en direct.
 
     C'est ici que le flux de données prend forme, une frame à la fois :
@@ -935,6 +1058,8 @@ def process_video(source: VideoSource, settings: dict[str, object], pipeline) ->
         source: Source d'images, non encore ouverte.
         settings: Réglages issus de `render_sidebar()`.
         pipeline: Composants retournés par `build_pipeline()`.
+        boot_slot: Emplacement portant l'écran d'initialisation affiché pendant
+            le chargement du modèle. Vidé dès la première image affichée.
 
     Raises:
         VideoSourceError: Si la source ne peut pas être ouverte.
@@ -953,6 +1078,16 @@ def process_video(source: VideoSource, settings: dict[str, object], pipeline) ->
         image_slot = st.empty()
         status_slot = st.empty()
         progress = st.progress(0.0)
+
+    # L'écran d'initialisation prend la place de la vidéo tant qu'aucune image
+    # n'a été traitée. Une attente sans signe de vie se lit comme une panne.
+    image_slot.markdown(
+        _boot_screen_html(
+            "INITIALISATION",
+            "Chargement du modèle et calibration de la cadence...",
+        ),
+        unsafe_allow_html=True,
+    )
 
     processed = 0
     lues = 0
@@ -1025,6 +1160,13 @@ def process_video(source: VideoSource, settings: dict[str, object], pipeline) ->
                     crossings=passages,
                 )
 
+                if boot_slot is not None:
+                    # La première image traitée est le seul signal fiable que le
+                    # système est prêt : le modèle est chargé, la source lit, le
+                    # pipeline tourne.
+                    boot_slot.empty()
+                    boot_slot = None
+
                 image_slot.image(
                     annotate(image, zone_manager, objects, settings),
                     channels="BGR",
@@ -1052,10 +1194,13 @@ def process_video(source: VideoSource, settings: dict[str, object], pipeline) ->
         progress.empty()
 
     if ecartees:
+        origine = "la caméra" if source.is_live else "le rythme de la vidéo"
         st.caption(
-            f"{ecartees} image(s) écartée(s) pour suivre le direct : le traitement "
-            "est plus lent que la caméra. Augmentez « Analyser une frame sur » "
-            "ou choisissez un modèle plus rapide."
+            f"{ecartees} image(s) écartée(s) pour suivre {origine} : le traitement "
+            "est plus lent que la source. Les **durées restent exactes** — seule "
+            "l'exhaustivité de l'observation est réduite. Pour tout examiner, "
+            "désactivez « Analyse en temps réel » à gauche ; l'analyse durera "
+            "alors plus longtemps que la vidéo."
         )
 
     logger.info(
@@ -1095,8 +1240,15 @@ def _status_line(
         f"{len(tracker.active())} · incidents : {incidents} · "
         f"{tracker.counts() or '—'}"
     )
+    if source.is_warming_up:
+        # Pendant la chauffe, aucune image n'est écartée : le dire évite de
+        # prendre les premières secondes saccadées pour un dysfonctionnement.
+        ligne += f" · initialisation ({source.warmup_remaining:.0f} s)"
     if dropped:
         ligne += f" · {dropped} image(s) écartée(s)"
+    if source.lag_s > 1.0:
+        # Le rattrapage ne suffit plus : la machine est durablement dépassée.
+        ligne += f" · retard {source.lag_s:.0f} s"
     return ligne
 
 
@@ -1536,11 +1688,22 @@ def main() -> None:
             )
             # Toutes les erreurs métier remontent ici sous forme de SentinelError :
             # l'utilisateur voit un message actionnable, jamais une trace Python.
+            # Peint avant `build_pipeline` : c'est lui qui charge les poids
+            # YOLO, l'opération la plus longue de la session. Sans signe de vie
+            # à ce moment-là, l'application paraît figée.
+            boot = st.empty()
+            boot.markdown(
+                _boot_screen_html(
+                    "INITIALISATION",
+                    "Chargement du modèle de détection...",
+                ),
+                unsafe_allow_html=True,
+            )
             try:
                 pipeline = build_pipeline(str(settings["weights"]), settings)
                 st.session_state["events"] = []
                 flux = open_source(source, settings)
-                process_video(flux, settings, pipeline)
+                process_video(flux, settings, pipeline, boot_slot=boot)
                 # La chronologie et le contexte survivent à la boucle : c'est ce
                 # qui permet de rééditer le rapport de session à chaque rerun
                 # sans relancer l'analyse.
@@ -1561,6 +1724,11 @@ def main() -> None:
                     "pour la trace complète.",
                     icon="❌",
                 )
+            finally:
+                # Un modèle introuvable ou une source injoignable laisserait
+                # sinon l'écran de chargement tourner indéfiniment au-dessus du
+                # message d'erreur.
+                boot.empty()
 
     # ── 3. Dépouiller ────────────────────────────────────────────────────────
     events = st.session_state["events"]

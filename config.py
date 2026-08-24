@@ -1273,6 +1273,79 @@ class VideoConfig:
 VIDEO: Final[VideoConfig] = VideoConfig()
 
 
+@dataclass(frozen=True)
+class RealtimeConfig:
+    """Analyse au rythme réel, y compris sur un fichier soumis.
+
+    Le problème
+    ------------
+    Sur un processeur, une inférence YOLO coûte de l'ordre de 100 à 150 ms.
+    Analyser **chaque** image d'une vidéo à 25 images/s demande donc trois à
+    quatre fois sa durée : dix minutes de vidéo occupent une demi-heure, pendant
+    laquelle l'opérateur regarde une image saccadée avancer au ralenti. Ce n'est
+    exploitable ni pour surveiller, ni pour démontrer.
+
+    Le compromis, énoncé franchement
+    ---------------------------------
+    Tenir le rythme réel suppose de **renoncer à voir toutes les images**. Le
+    système saute celles qu'il n'a pas eu le temps de traiter, exactement comme
+    il le fait déjà sur un flux en direct (§ 3.0 du README).
+
+    Ce que cela coûte, et ce que cela ne coûte pas :
+
+    * Le **temps métier reste exact**. Sur un fichier, `video_time` se calcule
+      depuis le numéro d'image : sauter des images ne le fausse pas, puisque le
+      compteur avance quand même. Toutes les durées — intrusion, rôdage,
+      immobilité — restent justes. C'est le point qui rend ce mode acceptable.
+    * La **reproductibilité stricte est perdue**. Deux analyses de la même vidéo
+      sur deux machines de puissances différentes n'examinent pas les mêmes
+      images, et peuvent donc relever des incidents légèrement différents. Une
+      détection qui n'apparaît que sur une image isolée peut être manquée.
+
+    D'où le mode `exhaustive` (`enabled=False`), qui examine toutes les images
+    et rend l'analyse reproductible au prix du temps. C'est celui à employer pour
+    produire une pièce contradictoire ; le mode temps réel est celui du travail
+    courant, et c'est pourquoi il est **le défaut**.
+
+    La fenêtre d'initialisation
+    ----------------------------
+    Les toutes premières secondes ne sont pas représentatives : Ultralytics
+    charge ses poids, importe ses dépendances au premier appel, et la première
+    inférence est souvent dix fois plus lente que les suivantes. Compter ce
+    retard-là comme un retard à rattraper ferait jeter des centaines d'images
+    dès la première seconde, et l'analyse démarrerait en sautant le début de la
+    vidéo — précisément le moment où la scène s'établit.
+
+    Pendant `warmup_s`, aucune image n'est donc écartée, et le chronomètre de
+    rythme ne démarre qu'à la fin de cette fenêtre.
+
+    Attributes:
+        enabled: Mode temps réel actif. **Vrai par défaut.**
+        warmup_s: Durée d'initialisation pendant laquelle aucune image n'est
+            écartée et où l'interface affiche son écran de chargement.
+        max_lag_s: Retard toléré avant de rattraper. Une tolérance nulle ferait
+            sauter une image dès le moindre à-coup ; une tolérance trop large
+            laisserait l'analyse dériver sans jamais rattraper.
+        max_dropped_frames: Plafond d'images écartées d'un seul coup. Après un
+            long décrochage — la machine s'est mise en veille, un autre logiciel
+            a saturé le processeur — on rattrape progressivement plutôt que de
+            bloquer la boucle sur des milliers de `grab()`.
+        hold_pace: Ralentir une machine **plus rapide** que le temps réel pour
+            que la vidéo défile à sa vitesse naturelle. Faux par défaut : une
+            analyse qui se termine plus tôt que prévu est un service rendu, pas
+            un défaut à corriger.
+    """
+
+    enabled: bool = True
+    warmup_s: float = 15.0
+    max_lag_s: float = 0.4
+    max_dropped_frames: int = 120
+    hold_pace: bool = False
+
+
+REALTIME: Final[RealtimeConfig] = RealtimeConfig()
+
+
 class SourceKind(str, Enum):
     """Nature de la source d'images.
 
@@ -1360,6 +1433,9 @@ class BrandConfig:
             fournis déclarent `width="100%"` sans dimension intrinsèque : une
             largeur explicite est **obligatoire** pour un rendu déterministe.
         anthracite: Couleur de fond de la marque, reprise des fichiers SVG.
+        steel_blue: Couleur d'accent, reprise des mêmes fichiers. Identique à
+            `primaryColor` de `.streamlit/config.toml` : le thème officiel ne
+            peut pas être lu depuis Python, et le CSS d'appoint en a besoin.
     """
 
     directory: Path = ASSETS_DIR
@@ -1368,6 +1444,7 @@ class BrandConfig:
     favicon: Path = ASSETS_DIR / "favicon.svg"
     header_width_px: int = 380
     anthracite: str = "#0F172A"
+    steel_blue: str = "#0EA5E9"
 
     def logo_for(self, *, dark_background: bool) -> Path:
         """Retourne le logo adapté au fond sur lequel il sera posé.
@@ -1463,6 +1540,7 @@ def validate() -> None:
     _validate_zones()
     _validate_lines()
     _validate_schedule()
+    _validate_realtime()
 
 
 def _validate_rules() -> None:
@@ -1559,6 +1637,22 @@ def _validate_lines() -> None:
                 f"{etiquette} : les deux sens portent le même libellé "
                 f"« {ligne.positive_label} ». Le comptage serait illisible."
             )
+
+
+def _validate_realtime() -> None:
+    """Les réglages de cadence forment un compromis tenable."""
+    if REALTIME.warmup_s < 0:
+        raise ValueError("Temps réel : warmup_s ne peut pas être négatif.")
+    if REALTIME.max_lag_s <= 0:
+        raise ValueError(
+            f"Temps réel : max_lag_s vaut {REALTIME.max_lag_s:g}. Une tolérance nulle "
+            "ferait écarter une image au moindre à-coup du système."
+        )
+    if REALTIME.max_dropped_frames < 1:
+        raise ValueError(
+            "Temps réel : max_dropped_frames doit valoir au moins 1, sinon le "
+            "rattrapage ne peut jamais avoir lieu et l'analyse dérive sans fin."
+        )
 
 
 def _validate_schedule() -> None:

@@ -132,6 +132,7 @@ class VideoSource:
         kind: SourceKind | None = None,
         settings: config.SourceConfig | None = None,
         capture_factory: Callable[..., object] | None = None,
+        realtime: config.RealtimeConfig | None = None,
     ) -> None:
         """Prépare la source sans l'ouvrir.
 
@@ -141,6 +142,7 @@ class VideoSource:
             settings: Réglages d'ouverture. `None` = `config.SOURCE`.
             capture_factory: Fabrique de capture, injectable pour les tests.
                 `None` = `cv2.VideoCapture`.
+            realtime: Réglages de cadence temps réel. `None` = `config.REALTIME`.
         """
         self.settings = settings or config.SOURCE
         self.kind = kind or detect_kind(target)
@@ -148,6 +150,8 @@ class VideoSource:
             int(target) if self.kind is SourceKind.WEBCAM else str(target)
         )
         self._capture_factory = capture_factory or cv2.VideoCapture
+
+        self.realtime = realtime or config.REALTIME
 
         self._capture = None
         self._fps: float = config.VIDEO.default_fps
@@ -157,6 +161,12 @@ class VideoSource:
         self._started_wall: datetime | None = None
         self._last_read_at: float = 0.0
         self._stopped: bool = False
+        # Fin de la fenêtre d'initialisation, et repère à partir duquel le
+        # rythme se mesure. Voir `_skip_to_keep_pace`.
+        self._warmup_until: float = 0.0
+        self._pace_wall: float | None = None
+        self._pace_video: float = 0.0
+        self._lag_s: float = 0.0
 
     # -- Constructeurs de confort --------------------------------------------
 
@@ -232,6 +242,12 @@ class VideoSource:
         self._started_at = time.monotonic()
         self._started_wall = datetime.now()
         self._last_read_at = self._started_at
+        self._warmup_until = self._started_at + (
+            self.realtime.warmup_s if self.paces_itself else 0.0
+        )
+        self._pace_wall = None
+        self._pace_video = 0.0
+        self._lag_s = 0.0
 
         logger.info(
             "Source %s ouverte : %s (%.1f fps%s)",
@@ -268,6 +284,43 @@ class VideoSource:
     def is_live(self) -> bool:
         """True si la source est infinie (webcam ou flux réseau)."""
         return self.kind.is_live
+
+    @property
+    def paces_itself(self) -> bool:
+        """True si la source doit tenir le rythme réel en écartant des images.
+
+        Un direct le fait toujours : les images arrivent qu'on les traite ou non,
+        et accumuler du retard revient à regarder le passé en croyant voir le
+        présent. Un fichier ne le fait que si le mode temps réel est actif — et
+        il l'est par défaut.
+        """
+        return self.is_live or self.realtime.enabled
+
+    @property
+    def is_warming_up(self) -> bool:
+        """True pendant la fenêtre d'initialisation.
+
+        Les premières secondes ne sont pas représentatives : la première
+        inférence est souvent dix fois plus lente que les suivantes. Les compter
+        comme du retard ferait sauter le début de la vidéo — précisément le
+        moment où la scène s'établit.
+        """
+        return self.is_open and time.monotonic() < self._warmup_until
+
+    @property
+    def warmup_remaining(self) -> float:
+        """Secondes restantes avant la fin de l'initialisation."""
+        return max(0.0, self._warmup_until - time.monotonic())
+
+    @property
+    def lag_s(self) -> float:
+        """Retard de l'analyse sur le rythme réel, en secondes.
+
+        Reste à 0 tant que la source tient la cadence. Une valeur qui grimpe
+        signale que même le rattrapage ne suffit plus — le plafond
+        `max_dropped_frames` est atteint à chaque lecture.
+        """
+        return self._lag_s
 
     @property
     def label(self) -> str:
@@ -441,12 +494,43 @@ class VideoSource:
         return self._index / self._fps
 
     def _skip_late_frames(self) -> int:
-        """Écarte les images accumulées pendant le traitement précédent.
+        """Écarte les images en retard, selon la nature de la source.
+
+        Deux problèmes distincts, deux calculs distincts — les confondre serait
+        une fausse économie :
+
+        * **En direct**, les images arrivent qu'on les traite ou non et
+          s'accumulent dans le tampon du pilote. Ce qui est en retard est ce qui
+          est arrivé *depuis la dernière lecture* : le calcul est instantané.
+        * **Sur un fichier**, rien ne s'accumule — le fichier attend. Le retard
+          est **cumulé** depuis le début de l'analyse, et se rattrape en avançant
+          dans le fichier jusqu'au point où le temps réel en est arrivé.
 
         Returns:
             Le nombre d'images écartées.
         """
-        if not self.is_live or not self.settings.drop_late_frames:
+        if self.is_live:
+            # Jamais gelé, même pendant l'initialisation : un flux en direct
+            # continue de produire, et laisser le tampon du pilote se remplir
+            # quinze secondes est exactement la panne que ce module existe pour
+            # empêcher. Le démarrage à froid coûte quelques images de plus — le
+            # bon prix pour une source qui ne se rejoue pas.
+            return self._skip_live_backlog()
+        if self.is_warming_up:
+            return 0
+        return self._skip_to_keep_pace()
+
+    def _skip_live_backlog(self) -> int:
+        """Vide le tampon du pilote pour rester sur le direct.
+
+        Le piège classique du RTSP : le tampon se remplit et l'opérateur finit
+        par regarder une scène vieille de plusieurs minutes en croyant voir le
+        direct.
+
+        Returns:
+            Le nombre d'images écartées.
+        """
+        if not self.settings.drop_late_frames:
             return 0
 
         elapsed = time.monotonic() - self._last_read_at
@@ -463,6 +547,68 @@ class VideoSource:
                 break
         logger.debug("%d image(s) écartée(s) pour rattraper le direct.", late)
         return late
+
+    def _skip_to_keep_pace(self) -> int:
+        """Avance dans un fichier jusqu'au point où le temps réel en est arrivé.
+
+        Le repère de rythme est posé à la **fin** de l'initialisation, pas à
+        l'ouverture : sinon les quinze secondes de chauffe compteraient comme du
+        retard, et l'analyse démarrerait en jetant plusieurs centaines d'images.
+
+        Le temps métier n'est pas faussé pour autant. Sur un fichier,
+        `video_time` vaut `index / fps` : `grab()` fait avancer l'index comme le
+        ferait `read()`, donc l'horodatage de chaque image reste exact et toutes
+        les durées restent justes. Ce qui est perdu n'est pas la mesure du temps,
+        c'est l'exhaustivité de l'observation.
+
+        Returns:
+            Le nombre d'images écartées.
+        """
+        if not self.realtime.enabled:
+            return 0
+
+        maintenant = time.monotonic()
+        if self._pace_wall is None:
+            # Première lecture après l'initialisation : on pose le repère ici.
+            self._pace_wall = maintenant
+            self._pace_video = self._video_time()
+            return 0
+
+        attendu = self._pace_video + (maintenant - self._pace_wall)
+        retard = attendu - self._video_time()
+
+        if self.realtime.hold_pace and retard < 0:
+            # Machine plus rapide que le temps réel : on attend plutôt que de
+            # faire défiler la vidéo en accéléré.
+            time.sleep(min(-retard, 1.0))
+            return 0
+
+        if retard <= self.realtime.max_lag_s:
+            self._lag_s = 0.0
+            return 0
+
+        a_sauter = int(retard * self._fps)
+        plafond = self.realtime.max_dropped_frames
+        saute = min(a_sauter, plafond)
+
+        ecartees = 0
+        for _ in range(saute):
+            if not self._capture.grab():
+                break
+            self._index += 1
+            ecartees += 1
+
+        # Ce qui n'a pas pu être rattrapé cette fois-ci reste du retard, et
+        # l'interface doit pouvoir le dire : une valeur qui grimpe signale une
+        # machine durablement dépassée, pas un à-coup.
+        self._lag_s = max(0.0, (a_sauter - ecartees) / max(1.0, self._fps))
+        if ecartees:
+            logger.debug(
+                "%d image(s) écartée(s) pour tenir le rythme (retard %.2f s).",
+                ecartees,
+                retard,
+            )
+        return ecartees
 
     def _reconnect_and_read(self) -> np.ndarray | None:
         """Tente de rétablir un flux interrompu, puis relit une image.

@@ -207,11 +207,20 @@ def test_file_video_time_is_reconstructed_from_the_frame_index() -> None:
     assert [round(f.video_time, 3) for f in frames] == [0.0, 0.05, 0.10, 0.15]
 
 
-def test_file_source_never_drops_frames() -> None:
-    """Sur un fichier, aucune image n'est sautée : la fidélité prime sur la fraîcheur."""
-    factory = _factory(frames=6)
+def test_a_file_keeps_every_frame_in_exhaustive_mode() -> None:
+    """En mode exhaustif, la fidélité prime sur la fraîcheur.
 
-    with VideoSource.from_file("video.mp4", capture_factory=factory) as source:
+    C'est le mode à employer pour produire une pièce contradictoire : toutes les
+    images sont examinées, et deux analyses de la même vidéo donnent exactement
+    le même résultat. Le mode temps réel — celui par défaut — fait l'arbitrage
+    inverse ; voir `test_realtime.py`.
+    """
+    factory = _factory(frames=6)
+    exhaustif = config.RealtimeConfig(enabled=False)
+
+    with VideoSource.from_file(
+        "video.mp4", capture_factory=factory, realtime=exhaustif
+    ) as source:
         frames = list(source.frames())
 
     assert all(f.dropped == 0 for f in frames)
@@ -349,14 +358,23 @@ def test_dropping_is_capped_to_avoid_blocking_the_loop(clock) -> None:
     assert rattrapage.dropped == 30
 
 
-def test_file_playback_is_never_accelerated_by_dropping(clock) -> None:
-    """Même avec un traitement lent, un fichier garde toutes ses images."""
+def test_nothing_is_dropped_during_the_warm_up_window(clock) -> None:
+    """Les premières secondes ne comptent pas comme du retard.
+
+    La première inférence est souvent dix fois plus lente que les suivantes :
+    Ultralytics charge ses poids et importe ses dépendances au premier appel. Les
+    compter comme du retard à rattraper ferait jeter plusieurs centaines d'images
+    dès le départ — précisément le moment où la scène s'établit.
+
+    Ici, quinze secondes de traitement très lent s'écoulent sans qu'une seule
+    image soit écartée.
+    """
     factory = _factory(frames=3)
 
     with VideoSource.from_file("video.mp4", capture_factory=factory) as source:
         frames = []
         for frame in source.frames():
-            clock.advance(5.0)  # traitement très lent
+            clock.advance(5.0)  # traitement très lent, dans la fenêtre de chauffe
             frames.append(frame)
 
     assert len(frames) == 3
