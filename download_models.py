@@ -21,9 +21,11 @@ dans `config.AVAILABLE_MODELS`).
 
 from __future__ import annotations
 
+import argparse
 import shutil
 import sys
 from pathlib import Path
+from typing import Sequence
 
 import config
 
@@ -116,22 +118,68 @@ def download_model(label: str, destination: Path) -> bool:
     return True
 
 
-def main() -> int:
-    """Télécharge tous les modèles déclarés dans `config.AVAILABLE_MODELS`.
+def _selection(motifs: Sequence[str]) -> dict[str, Path]:
+    """Modèles retenus d'après les motifs passés en ligne de commande.
+
+    Args:
+        motifs: Fragments de nom, insensibles à la casse (« nano », « small »).
+            Vide = tous les modèles.
+
+    Returns:
+        Le sous-ensemble de `config.AVAILABLE_MODELS` correspondant.
+
+    Raises:
+        SystemExit: Si aucun motif ne correspond. Se tromper de fragment et
+            construire une image sans aucun poids doit échouer bruyamment,
+            plutôt que produire un conteneur silencieusement inutilisable.
+    """
+    if not motifs:
+        return dict(config.AVAILABLE_MODELS)
+
+    retenus = {
+        label: chemin
+        for label, chemin in config.AVAILABLE_MODELS.items()
+        if any(motif.lower() in f"{label} {chemin.name}".lower() for motif in motifs)
+    }
+    if not retenus:
+        connus = ", ".join(config.AVAILABLE_MODELS)
+        raise SystemExit(f"Aucun modele ne correspond a {list(motifs)}. Connus : {connus}")
+    return retenus
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Télécharge les modèles déclarés dans `config.AVAILABLE_MODELS`.
+
+    Args:
+        argv: Arguments de ligne de commande. `None` = `sys.argv[1:]`.
 
     Returns:
         Code de sortie du processus : 0 si tous les modèles sont disponibles,
         1 si au moins un a échoué (utile en intégration continue).
     """
+    parser = argparse.ArgumentParser(
+        description="Depose les poids YOLO dans models/, une fois pour toutes."
+    )
+    parser.add_argument(
+        "--only",
+        nargs="+",
+        default=(),
+        metavar="MOTIF",
+        help=(
+            "Ne telecharger que les modeles dont le nom contient l'un de ces "
+            "fragments. Utile a la construction d'une image : n'embarquer que "
+            "« nano » economise une cinquantaine de megaoctets."
+        ),
+    )
+    options = parser.parse_args(list(argv) if argv is not None else None)
+    demandes = _selection(options.only)
+
     print("SentinelReport - preparation des modeles de detection")
     print(f"Dossier de destination : {config.MODELS_DIR}\n")
 
     config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-    results = {
-        label: download_model(label, path)
-        for label, path in config.AVAILABLE_MODELS.items()
-    }
+    results = {label: download_model(label, path) for label, path in demandes.items()}
 
     failed = [label for label, ok in results.items() if not ok]
     print()

@@ -1,0 +1,35 @@
+# Déploiement Render — l'hébergement le plus proche d'un « Vercel pour Python
+# durable » : un conteneur qui tourne en continu, avec un disque persistant.
+#
+# Voir DEPLOIEMENT.md pour les trois autres cibles testées et pour la raison
+# pour laquelle Vercel ne peut pas héberger l'application elle-même.
+
+services:
+  - type: web
+    name: sentinelreport
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter # le plan gratuit s'endort et manque de mémoire pour PyTorch
+    region: frankfurt
+    healthCheckPath: /_stcore/health # point de santé officiel de Streamlit
+    autoDeploy: true
+
+    envVars:
+      # Les preuves et les rapports sont écrits ici, hors du code applicatif.
+      - key: SENTINEL_STATE_DIR
+        value: /data
+      - key: SENTINEL_LOG_LEVEL
+        value: INFO
+      # Ultralytics écrit ses réglages dans le dossier personnel ; sans cette
+      # variable, il tente d'écrire dans un emplacement non inscriptible et
+      # journalise un avertissement à chaque démarrage.
+      - key: YOLO_CONFIG_DIR
+        value: /data/ultralytics
+
+    disk:
+      # Un disque persistant, et non le système de fichiers éphémère : sans lui,
+      # les preuves et les rapports disparaîtraient à chaque redéploiement, et la
+      # purge par `EVIDENCE.retention_days` n'aurait plus rien à purger.
+      name: sentinel-state
+      mountPath: /data
+      sizeGB: 5

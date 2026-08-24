@@ -1,0 +1,31 @@
+# Ce qui n'a rien à faire dans l'image.
+#
+# Chaque entrée retirée du contexte accélère `docker build` et allège l'image.
+# Les deux qui comptent vraiment sont `.venv/` et `models/` : le premier peut
+# peser plusieurs gigaoctets, le second serait de toute façon reconstruit par
+# `download_models.py` pendant la construction.
+
+.git/
+.gitignore
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Les poids sont téléchargés à la construction, pas copiés depuis la machine de
+# développement : l'image doit être reproductible depuis un dépôt propre.
+models/*.pt
+*.pt
+
+# Sorties d'exécution locales — données potentiellement sensibles.
+evidence/*
+reports/*
+data/videos/*
+
+# Page vitrine : elle est déployée sur Vercel, pas dans le conteneur.
+public/
+vercel.json
+
+.env
+.streamlit/secrets.toml
+.DS_Store

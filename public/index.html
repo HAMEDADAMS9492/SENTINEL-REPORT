@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SentinelReport — détection d'incidents de sécurité par vision par ordinateur</title>
+<meta name="description" content="YOLOv8 + ByteTrack : brouillons de rapports d'incident horodatés, avec preuve visuelle et score de priorité traçable. Le logiciel ne juge pas la faute et n'identifie personne.">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<meta property="og:title" content="SentinelReport">
+<meta property="og:description" content="Détection d'incidents de sécurité par vision par ordinateur. Le rapport produit est un brouillon, à valider par un humain.">
+<meta property="og:type" content="website">
+<style>
+  :root {
+    --anthracite: #0F172A;
+    --acier: #0EA5E9;
+    --ardoise: #64748B;
+    --encre: #F8FAFC;
+    --trait: #1E293B;
+    --fond-carte: #16203A;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--anthracite);
+    color: var(--encre);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .enveloppe { max-width: 980px; margin: 0 auto; padding: 0 24px; }
+
+  header { padding: 72px 0 44px; text-align: center; }
+  header img { width: min(360px, 84vw); height: auto; display: block; margin: 0 auto 28px; }
+  h1 { font-size: clamp(1.7rem, 4.4vw, 2.5rem); line-height: 1.2; margin: 0 0 14px; letter-spacing: -0.02em; }
+  .accroche { color: #CBD5E1; font-size: clamp(1rem, 2.4vw, 1.12rem); max-width: 62ch; margin: 0 auto; }
+
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin: 34px 0 8px; }
+  .bouton {
+    display: inline-block; padding: 12px 22px; border-radius: 10px;
+    font-weight: 700; text-decoration: none; font-size: 0.95rem;
+    border: 1px solid transparent; transition: transform .12s ease, background .12s ease;
+  }
+  .bouton:hover { transform: translateY(-1px); }
+  .principal { background: var(--acier); color: #04121F; }
+  .principal:hover { background: #38BDF8; }
+  .secondaire { border-color: var(--trait); color: var(--encre); background: #111C33; }
+  .secondaire:hover { background: #17233E; }
+
+  .avis {
+    margin: 40px 0 0; padding: 16px 20px; border-radius: 12px;
+    background: rgba(14,165,233,.08); border: 1px solid rgba(14,165,233,.28);
+    color: #BAE6FD; font-size: 0.93rem;
+  }
+  .avis strong { color: var(--encre); }
+
+  section { padding: 44px 0; border-top: 1px solid var(--trait); }
+  h2 { font-size: 1.22rem; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .sous-titre { color: var(--ardoise); font-size: 0.92rem; margin: 0 0 24px; }
+
+  .grille { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(248px, 1fr)); }
+  .carte {
+    background: var(--fond-carte); border: 1px solid var(--trait);
+    border-radius: 12px; padding: 20px;
+  }
+  .carte h3 { margin: 0 0 8px; font-size: 1rem; color: var(--acier); }
+  .carte p { margin: 0; color: #C7D2E0; font-size: 0.92rem; }
+
+  .flux {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    background: var(--fond-carte); border: 1px solid var(--trait);
+    border-radius: 12px; padding: 20px; font-size: 0.88rem;
+  }
+  .etape { background: #0B1526; border: 1px solid var(--trait); border-radius: 8px; padding: 8px 12px; white-space: nowrap; }
+  .fleche { color: var(--ardoise); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--trait); vertical-align: top; }
+  th { color: var(--ardoise); font-weight: 600; font-size: 0.82rem; text-transform: uppercase; letter-spacing: .06em; }
+  td:first-child { color: var(--acier); font-weight: 600; white-space: nowrap; }
+  .conteneur-table { overflow-x: auto; }
+
+  ul { margin: 0; padding-left: 20px; color: #C7D2E0; font-size: 0.93rem; }
+  li { margin-bottom: 8px; }
+  li strong { color: var(--encre); }
+
+  .chiffres { display: flex; flex-wrap: wrap; gap: 28px; justify-content: center; margin-top: 8px; }
+  .chiffre { text-align: center; }
+  .chiffre b { display: block; font-size: 1.7rem; color: var(--acier); line-height: 1.2; }
+  .chiffre span { color: var(--ardoise); font-size: 0.82rem; }
+
+  footer { padding: 36px 0 60px; text-align: center; color: var(--ardoise); font-size: 0.85rem; border-top: 1px solid var(--trait); }
+  footer a { color: var(--ardoise); }
+  code { background: #0B1526; border: 1px solid var(--trait); border-radius: 5px; padding: 1px 6px; font-size: 0.86em; }
+</style>
+</head>
+<body>
+
+<div class="enveloppe">
+
+  <header>
+    <img src="/assets/logo-sombre.svg" alt="SentinelReport">
+    <h1>Détection d'incidents de sécurité par vision par ordinateur</h1>
+    <p class="accroche">
+      Une vidéo entre, des <strong>brouillons de rapports horodatés</strong> sortent —
+      chacun avec sa preuve visuelle, sa durée constatée et un score de priorité
+      dont le calcul est publié ligne par ligne.
+    </p>
+
+    <div class="actions">
+      <a class="bouton principal" href="https://github.com/HAMEDADAMS9492/SENTINEL-REPORT">Voir le code</a>
+      <a class="bouton secondaire" href="https://github.com/HAMEDADAMS9492/SENTINEL-REPORT/blob/main/README.md">Documentation technique</a>
+      <a class="bouton secondaire" href="https://github.com/HAMEDADAMS9492/SENTINEL-REPORT/blob/main/DEPLOIEMENT.md">Lancer l'application</a>
+    </div>
+
+    <div class="chiffres">
+      <div class="chiffre"><b>625</b><span>tests</span></div>
+      <div class="chiffre"><b>5</b><span>règles d'incident</span></div>
+      <div class="chiffre"><b>0</b><span>dépendance superflue</span></div>
+    </div>
+  </header>
+
+  <div class="avis">
+    <strong>Ce que ce logiciel ne fait pas.</strong> Il ne juge aucune faute et
+    n'identifie personne. Le document produit porte la mention
+    <em>BROUILLON</em> : sa validation par un opérateur humain est obligatoire
+    avant toute exploitation. Aucune arme à feu n'est détectable — le jeu de
+    données COCO n'en contient pas, et l'interface le dit à l'endroit où la
+    question se pose.
+  </div>
+
+  <section>
+    <h2>Le pipeline</h2>
+    <p class="sous-titre">Flux strictement unidirectionnel : l'information ne remonte jamais.</p>
+    <div class="flux">
+      <span class="etape">VideoSource</span><span class="fleche">→</span>
+      <span class="etape">Detector</span><span class="fleche">→</span>
+      <span class="etape">Tracker</span><span class="fleche">→</span>
+      <span class="etape">ZoneManager</span><span class="fleche">→</span>
+      <span class="etape">EventEngine</span><span class="fleche">→</span>
+      <span class="etape">Timeline</span><span class="fleche">→</span>
+      <span class="etape">ReportGenerator</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Quatre décisions de conception</h2>
+    <p class="sous-titre">Celles qu'il faut pouvoir défendre.</p>
+    <div class="grille">
+      <div class="carte">
+        <h3>Deux horloges</h3>
+        <p>Le temps vidéo pilote toutes les décisions métier ; l'heure réelle date le rapport et qualifie le hors-horaires. En direct, le temps vidéo devient l'heure écoulée — sans quoi les images sautées fausseraient toutes les durées.</p>
+      </div>
+      <div class="carte">
+        <h3>Un score, pas un modèle</h3>
+        <p>Chaque point provient d'un signal déjà mesuré : une règle déclenchée, des secondes, une heure au calendrier. Ni pondération opaque, ni seuil appris. Le score n'ajoute aucune information — il ordonne celle qui existe.</p>
+      </div>
+      <div class="carte">
+        <h3>Seuils relatifs à la perspective</h3>
+        <p>Vingt-cinq pixels valent un frémissement au premier plan et une traversée au fond du champ. Toutes les distances sont rapportées à la taille apparente de l'objet : même critère physique à toutes les profondeurs, sans calibration.</p>
+      </div>
+      <div class="carte">
+        <h3>Le doute vaut refus</h3>
+        <p>La ré-association des pistes perdues est désactivée par défaut : fusionner deux personnes ferait affirmer un fait faux à un document opposable. Entre manquer un incident et en fabriquer un, on choisit le premier.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Les règles</h2>
+    <p class="sous-titre">Chacune exige une durée : traverser ne déclenche rien.</p>
+    <div class="conteneur-table">
+      <table>
+        <thead><tr><th>Incident</th><th>Condition</th><th>Ce qui l'écarte</th></tr></thead>
+        <tbody>
+          <tr><td>Intrusion</td><td>Présence prolongée en zone interdite</td><td>Un simple passage</td></tr>
+          <tr><td>Rôdage</td><td>Stationnement anormalement long</td><td>Une zone de comptage</td></tr>
+          <tr><td>Objet abandonné</td><td>Immobile, et son porteur a quitté le champ</td><td>Un propriétaire encore présent</td></tr>
+          <tr><td>Hors horaires</td><td>Présence en dehors des heures d'ouverture</td><td>L'heure réelle, pas le temps vidéo</td></tr>
+          <tr><td>Surdensité</td><td>Plus de N personnes, assez longtemps</td><td>Un croisement devant une porte</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Pourquoi cette page est statique</h2>
+    <p class="sous-titre">Et où tourne réellement l'application.</p>
+    <ul>
+      <li><strong>Vercel héberge des fonctions sans état</strong>, pas un serveur durable. Streamlit a besoin d'une connexion WebSocket maintenue pendant toute la session.</li>
+      <li><strong>Le poids des dépendances.</strong> PyTorch, Ultralytics et OpenCV pèsent plus de 2 Go décompressés ; une fonction Vercel est plafonnée à 250 Mo.</li>
+      <li><strong>La durée.</strong> Analyser une vidéo prend des minutes ; une fonction s'arrête au bout de quelques dizaines de secondes.</li>
+      <li><strong>L'écriture disque.</strong> Les preuves et les rapports sont écrits sur un volume ; une fonction n'en a pas de persistant.</li>
+    </ul>
+    <p class="sous-titre" style="margin-top:20px">
+      L'application tourne donc sur un hébergement à conteneur — un
+      <code>Dockerfile</code> et un <code>render.yaml</code> sont fournis, et
+      <code>DEPLOIEMENT.md</code> détaille les quatre cibles testées.
+    </p>
+  </section>
+
+  <footer>
+    <p>
+      SentinelReport — projet personnel.
+      <a href="https://github.com/HAMEDADAMS9492/SENTINEL-REPORT">github.com/HAMEDADAMS9492/SENTINEL-REPORT</a>
+    </p>
+    <p>Le rapport produit est un brouillon. Sa validation par un humain est obligatoire.</p>
+  </footer>
+
+</div>
+</body>
+</html>

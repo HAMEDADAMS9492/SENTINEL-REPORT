@@ -22,9 +22,19 @@ from typing import Final, Sequence
 # ---------------------------------------------------------------------------
 
 BASE_DIR: Final[Path] = Path(__file__).resolve().parent
+
+# Racine des sorties d'exécution — preuves et rapports. Surchargeable par
+# `SENTINEL_STATE_DIR`, pour les hébergements dont le système de fichiers
+# applicatif est en lecture seule et qui n'offrent qu'un volume monté ailleurs.
+# Les autres chemins restent relatifs au dépôt : les poids sont livrés avec
+# l'image, les vidéos de test appartiennent au dépôt.
+STATE_DIR: Final[Path] = Path(
+    os.environ.get("SENTINEL_STATE_DIR", str(BASE_DIR))
+).resolve()
+
 MODELS_DIR: Final[Path] = BASE_DIR / "models"
-EVIDENCE_DIR: Final[Path] = BASE_DIR / "evidence"
-REPORTS_DIR: Final[Path] = BASE_DIR / "reports"
+EVIDENCE_DIR: Final[Path] = STATE_DIR / "evidence"
+REPORTS_DIR: Final[Path] = STATE_DIR / "reports"
 DATA_DIR: Final[Path] = BASE_DIR / "data"
 VIDEOS_DIR: Final[Path] = DATA_DIR / "videos"
 

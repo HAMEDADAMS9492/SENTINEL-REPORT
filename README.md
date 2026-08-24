@@ -5,7 +5,7 @@ automatique d'un brouillon de rapport d'incident horodaté avec image de preuve.
 
 > **État : ÉTAPE 9 / 9 — le cœur fonctionnel est complet.** La chaîne vidéo →
 > détection → suivi → zones → règles → rapport PDF/CSV tourne de bout en bout,
-> couverte par 625 tests, validés sur Python 3.11 / Streamlit 1.44 et Python 3.14 / Streamlit 1.54. Voir « Avancement » et « Feuille de route » plus bas.
+> couverte par 650 tests, validés sur Python 3.11 / Streamlit 1.44 et Python 3.14 / Streamlit 1.54. Voir « Avancement » et « Feuille de route » plus bas.
 
 ---
 
@@ -61,12 +61,17 @@ SENTINEL REPORT/
 │   ├── report.py          # ReportGenerator — Event -> texte + PDF
 │   └── session_report.py  # Rapport de session à deux niveaux
 │
+├── Dockerfile             # Image d'exécution (Render, Fly.io, HF Spaces, Docker)
+├── render.yaml            # Déploiement Render en un clic
+├── vercel.json            # Page vitrine statique — voir DEPLOIEMENT.md
+├── public/index.html      # La vitrine elle-même, sans dépendance externe
+│
 ├── evidence/              # Captures horodatées (générées, non versionnées)
 ├── reports/               # Rapports PDF/CSV exportés
 ├── data/videos/           # Vidéos de test
 ├── assets/                # Identité visuelle (logos, favicon)
 ├── models/                # Poids YOLO (déposés par download_models.py)
-└── tests/                 # 625 tests, sans modèle ni vidéo : logique métier,
+└── tests/                 # 650 tests, sans modèle ni vidéo : logique métier,
                            # invariants d'architecture, hygiène des dépendances
 ```
 
@@ -916,7 +921,7 @@ Dans l'ordre, depuis la racine du projet, environnement virtuel activé :
 ```bash
 pip install -r requirements.txt   # 1. dépendances (une fois)
 python download_models.py         # 2. poids YOLO dans models/ (une fois)
-pytest -q                         # 3. vérification : 625 tests, < 6 s
+pytest -q                         # 3. vérification : 650 tests, < 6 s
 streamlit run app.py              # 4. interface (complète à partir de l'étape 7)
 ```
 
@@ -1097,7 +1102,7 @@ le décrit annonce un produit qui n'est pas livré. Cette campagne l'a corrigé.
 | E | Score affiché dans le rapport d'incident | Le même incident portait « critique » à l'écran et aucune priorité sur le papier. |
 | F | Surface publique et documentation | `__all__` décrivait le projet tel qu'il était à l'étape 3. |
 
-**Le cœur du projet est fonctionnel** : 625 tests, et la chaîne source → suivi →
+**Le cœur du projet est fonctionnel** : 650 tests, et la chaîne source → suivi →
 zones → incidents → chronologie → rapports PDF/CSV tourne de bout en bout, sur
 fichier comme sur webcam.
 
@@ -1211,6 +1216,37 @@ prévu pour cela.
 
 ---
 
-## 9. Licence
+## 9. Déploiement
+
+**Vercel héberge la page vitrine ; l'application tourne dans un conteneur
+ailleurs.** Ce n'est pas un contournement : une application Streamlit maintient
+une connexion WebSocket pendant toute la session, là où Vercel n'exécute que des
+fonctions sans état. S'y ajoutent trois obstacles indépendants — plus de 2 Go de
+dépendances contre 250 Mo autorisés, une analyse qui dure des minutes contre
+quelques dizaines de secondes, et l'écriture des preuves sur un disque que les
+fonctions n'ont pas.
+
+| Cible | Rôle | Fichier |
+|---|---|---|
+| Vercel | page vitrine statique | `vercel.json`, `public/index.html` |
+| Render | application, disque persistant | `render.yaml` |
+| Hugging Face Spaces | démonstration gratuite | `Dockerfile` |
+| Fly.io, Cloud Run, Docker | au choix | `Dockerfile` |
+
+```bash
+vercel --prod                    # la vitrine
+docker build -t sentinelreport . # l'application
+docker run -p 8501:8501 -v sentinel_state:/data sentinelreport
+```
+
+Trois points à trancher avant d'exposer une instance publique : la **rétention**
+des preuves, l'**absence d'authentification** (§ 7), et le **floutage** des tiers,
+désactivé par défaut. Le détail — variables d'environnement, pièges d'OpenCV en
+conteneur, ce qui change une fois hébergé — est dans
+**[DEPLOIEMENT.md](DEPLOIEMENT.md)**.
+
+---
+
+## 10. Licence
 
 Projet réalisé dans un cadre pédagogique.
