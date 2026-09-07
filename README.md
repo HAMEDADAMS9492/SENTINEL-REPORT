@@ -3,9 +3,28 @@
 Détection d'incidents de sécurité par vision par ordinateur, et rédaction
 automatique d'un brouillon de rapport d'incident horodaté avec image de preuve.
 
-> **État : ÉTAPE 9 / 9 — le cœur fonctionnel est complet.** La chaîne vidéo →
-> détection → suivi → zones → règles → rapport PDF/CSV tourne de bout en bout,
-> couverte par 650 tests, validés sur Python 3.11 / Streamlit 1.44 et Python 3.14 / Streamlit 1.54. Voir « Avancement » et « Feuille de route » plus bas.
+> **État : complet et branché de bout en bout.** Source (fichier, webcam ou
+> RTSP) → détection → suivi → zones → règles → chronologie → rapports PDF/CSV,
+> **au rythme réel de la vidéo**. Couvert par **650 tests**, verts sur
+> Python 3.11 / Streamlit 1.44 et Python 3.14 / Streamlit 1.54.
+>
+> Le détail des quatorze phases qui ont mené à cet état — ce qui a changé, ce que
+> ça débloque, ce qu'il faut vérifier à l'œil — est dans
+> **[MIGRATION_NOTES.md](MIGRATION_NOTES.md)**.
+
+## Sommaire
+
+| § | Section | Ce qu'on y trouve |
+|---|---|---|
+| [1](#1-cas-dusage) | Cas d'usage | Le problème, et ce que le logiciel refuse de faire |
+| [2](#2-architecture) | Architecture | Arborescence, rôle de chaque module, flux de données |
+| [3](#3-algorithmes-utilisés) | Algorithmes | Les seize briques, de la source au rapport |
+| [4](#4-installation) | Installation | Trois commandes |
+| [5](#5-utilisation) | Utilisation | Régler, lancer, adapter les zones à sa scène |
+| [6](#6-avancement) | Avancement | Ce qui est fait, et la campagne d'assainissement |
+| [7](#7-limites-connues) | **Limites connues** | Les angles morts, énoncés |
+| [8](#8-feuille-de-route-et-extensions) | Feuille de route | Ce qui reste, et ce qui est exclu — avec les raisons |
+| [9](#9-déploiement) | Déploiement | Vitrine Vercel, application en conteneur |
 
 ---
 
@@ -19,13 +38,20 @@ problèmes concrets :
 2. **Rédiger un rapport d'incident prend du temps** et se fait souvent après coup,
    de mémoire, avec des horodatages approximatifs.
 
-SentinelReport analyse un flux vidéo (fichier ou webcam) et répond aux deux :
+SentinelReport analyse une source vidéo — fichier, webcam ou flux RTSP — et
+répond aux deux :
 
-- il signale uniquement les situations qui correspondent à une **règle explicite**
-  — intrusion en zone restreinte, présence prolongée, objet abandonné, présence
-  hors horaires ;
+- il signale uniquement les situations qui correspondent à une **règle
+  explicite** : intrusion en zone interdite, présence prolongée, objet
+  abandonné, présence hors horaires, surdensité ;
 - pour chacune, il produit un **brouillon de rapport** horodaté à la seconde,
-  accompagné de la capture d'écran correspondante.
+  accompagné de la capture correspondante et d'un **score de priorité dont le
+  calcul est publié ligne par ligne** ;
+- en fin de session, il assemble un **rapport à deux niveaux** : les incidents
+  triés par priorité, puis la chronologie du déroulé.
+
+L'analyse tient le **rythme réel de la vidéo** par défaut : dix minutes de vidéo
+s'analysent en dix minutes, pas en trente (§ 3.2).
 
 **Ce que le logiciel ne fait pas, volontairement :** il ne décide pas s'il y a
 faute, il n'identifie personne, il ne déclenche aucune alarme automatique. Il
@@ -45,21 +71,29 @@ ou expliqué isolément.
 SENTINEL REPORT/
 ├── config.py              # Réglages centralisés (SEUL endroit avec des valeurs métier)
 ├── app.py                 # Interface Streamlit — orchestration et affichage uniquement
+├── conftest.py            # Rend la racine importable, quel que soit l'interpréteur
+├── download_models.py     # Dépose les poids YOLO dans models/, une fois pour toutes
 ├── requirements.txt
 ├── README.md
+├── MIGRATION_NOTES.md     # Les quatorze phases, et quoi vérifier à l'œil
+├── DEPLOIEMENT.md         # Pourquoi Vercel ne suffit pas, et ce qui convient
 │
-├── sentinel/              # Paquet applicatif
+├── sentinel/              # Paquet applicatif — le pipeline, dans son sens de lecture
 │   ├── __init__.py
-│   ├── exceptions.py      # Hiérarchie d'erreurs métier (SentinelError et filles)
-│   ├── detection.py       # dataclass Detection : le contrat entre les modules
-│   ├── source.py          # VideoSource   — fichier / webcam / flux RTSP unifiés
-│   ├── detector.py        # Detector      — YOLOv8 : frame -> détections
-│   ├── tracker.py         # Tracker       — mémoire temporelle des objets suivis
-│   ├── zones.py           # ZoneManager   — zones polygonales, appartenance, dessin
-│   ├── events.py          # EventEngine   — règles + score de priorité -> Event
-│   ├── timeline.py        # Timeline      — faits marquants par tranche de temps
-│   ├── report.py          # ReportGenerator — Event -> texte + PDF
-│   └── session_report.py  # Rapport de session à deux niveaux
+│   ├── exceptions.py           # Hiérarchie d'erreurs métier (SentinelError et filles)
+│   ├── detection.py            # dataclass Detection : le contrat entre les modules
+│   ├── source.py               # VideoSource     — fichier / webcam / RTSP, cadence
+│   ├── detector.py             # Detector        — YOLOv8 : frame -> détections
+│   ├── tracker.py              # Tracker         — mémoire temporelle des objets
+│   ├── reidentification.py     # ReidentifBuffer — pistes perdues (optionnel, § 3.10)
+│   ├── zones.py                # ZoneManager     — géométrie et règles applicables
+│   ├── occupancy.py            # ZoneOccupancy   — combien d'objets, depuis quand
+│   ├── crossing.py             # LineCounter     — franchissements de ligne
+│   ├── events.py               # EventEngine     — règles + score -> Event
+│   ├── evidence.py             # EvidenceWriter  — captures, rétention, floutage
+│   ├── timeline.py             # Timeline        — faits marquants par tranche
+│   ├── report.py               # ReportGenerator — Event -> texte + PDF
+│   └── session_report.py       # Rapport de session à deux niveaux
 │
 ├── Dockerfile             # Image d'exécution (Render, Fly.io, HF Spaces, Docker)
 ├── render.yaml            # Déploiement Render en un clic
@@ -93,8 +127,12 @@ plus souvent et le point d'entrée.
 | `sentinel/source.py` | Fournit les images horodatées, qu'elles viennent d'un fichier, d'une webcam ou d'un flux RTSP — le reste du pipeline ignore leur origine. |
 | `sentinel/detector.py` | Charge YOLOv8 et transforme une frame en liste de détections. |
 | `sentinel/tracker.py` | Se souvient de chaque objet suivi : depuis quand il est là, où il est passé, dans quelle zone et depuis combien de temps. |
-| `sentinel/zones.py` | Répond à « cet objet est-il dans cette zone ? » et dessine les zones. |
-| `sentinel/events.py` | Applique les règles de la configuration, produit des `Event` structurés et calcule leur score de priorité. |
+| `sentinel/reidentification.py` | Tente de rattacher un objet réapparu à la piste qu'il prolonge. **Désactivé par défaut** : son mode de panne est pire que le problème qu'il résout. |
+| `sentinel/zones.py` | Répond à deux questions de périmètre : « cet objet est-il dans cette zone, et à quelle distance du bord ? » et « cette zone accepte-t-elle ce type d'incident ? ». |
+| `sentinel/occupancy.py` | Compte les occupants distincts par zone et par classe, et depuis combien de temps un seuil est tenu. |
+| `sentinel/crossing.py` | Constate les franchissements de ligne et leur sens, au signe du produit vectoriel. |
+| `sentinel/events.py` | Applique les règles, produit des `Event` immuables et calcule leur score de priorité. N'écrit aucun fichier. |
+| `sentinel/evidence.py` | Écrit les captures justificatives, applique la durée de conservation et l'anonymisation éventuelle. |
 | `sentinel/timeline.py` | Observe le déroulé et retient les faits marquants, tranche par tranche de temps vidéo. |
 | `sentinel/report.py` | Transforme un `Event` en rapport français, exportable en PDF. |
 | `sentinel/session_report.py` | Assemble le rapport de session : incidents triés par priorité, puis chronologie. |
@@ -122,21 +160,26 @@ plus souvent et le point d'entrée.
         │  list[TrackedObject]  (+ âge, historique, chronos de zone)
         ▼
 ┌───────────────────┐
-│ ZoneManager       │  test point-dans-polygone sur le point d'appui au sol
-│ .zones_for()      │
+│ ZoneManager       │  distance signée au bord, sur le point d'appui au sol
+│ .zones_for()      │  + quelles règles chaque zone accepte
 └───────────────────┘
-        │  {objet -> zones occupées}     → TrackedObject.update_zones()
+        │  {zone -> marge signée}        → TrackedObject.update_zones()
         ▼
-┌───────────────────┐
-│ EventEngine       │  règles : classe + zone + durée + anti-rebond
-│ .evaluate()       │
-└───────────────────┘
-        │  list[Event]  (+ capture de preuve écrite dans /evidence)
-        ▼
+┌───────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+│ EventEngine       │←──│ ZoneOccupancy    │   │ LineCounter      │
+│ .evaluate()       │   │ combien, depuis  │   │ franchissements  │
+│ règles + score    │   │ quand            │   │ et leur sens     │
+└───────────────────┘   └──────────────────┘   └──────────────────┘
+        │  list[Event]                  │              │
+        ▼                               │              │
+┌───────────────────┐                   │              │
+│ EvidenceWriter    │  capture, rétention, floutage    │
+└───────────────────┘                   │              │
+        │                               ▼              ▼
 ┌───────────────────┐        ┌───────────────────┐
 │ ReportGenerator   │        │ Timeline.observe()│  transitions : entrées,
-│  gabarit → PDF    │        │                   │  sorties, incidents
-└───────────────────┘        └───────────────────┘
+│  gabarit → PDF    │        │                   │  sorties, incidents,
+└───────────────────┘        └───────────────────┘  occupation, passages
         │                            │
         ▼                            ▼
    Rapport d'incident        ┌───────────────────┐
@@ -155,14 +198,32 @@ détecteur ignore l'existence des zones, les zones ignorent les événements, le
 événements ignorent le format du rapport. Chaque étage enrichit la donnée et la
 passe au suivant.
 
+Deux verrous de test l'imposent : ni `report.py` ni `session_report.py` ne
+doivent contenir `PriorityScore(`, `points_for` ou `level_for` — ils **lisent**
+un score, ils n'en calculent aucun. Et `events.py` ne doit contenir ni
+`cv2.imwrite` ni `mkdir` : la capture des preuves appartient à `evidence.py`,
+qui a d'autres raisons de changer (format, conservation, anonymisation).
+
 ### 2.5 Deux horloges, et pourquoi
 
-- **Temps vidéo** (`frame_index / fps`) : pilote **toutes** les décisions métier.
-  Une vidéo analysée en accéléré ou au ralenti produit exactement les mêmes
-  incidents — l'analyse est donc reproductible, ce qui est indispensable pour un
-  document à valeur de rapport.
+- **Temps vidéo** : pilote **toutes** les décisions métier. Une vidéo analysée
+  sur une machine lente ou rapide produit les mêmes **durées** — condition pour
+  qu'un document ait valeur de rapport.
 - **Heure réelle** (`datetime`) : sert uniquement à dater le rapport et à
   évaluer la règle « hors horaires ».
+
+Le temps vidéo n'est pas calculé de la même façon selon la source, et c'est le
+point le plus subtil du projet :
+
+| Source | Temps vidéo | Pourquoi |
+|---|---|---|
+| Fichier | `frame_index / fps` — **reconstruit** | Le fichier attend ; le compteur d'images mesure fidèlement le temps. |
+| Direct | temps écoulé à l'horloge — **observé** | Des images sont volontairement sautées ; le compteur cesse de mesurer le temps, et `index / fps` sous-estimerait toutes les durées. |
+
+En mode temps réel, des images sont aussi écartées sur un **fichier** — sans que
+le temps vidéo en soit faussé pour autant, puisque `grab()` fait avancer l'index
+exactement comme `read()`. Ce qui est perdu n'est pas la mesure du temps, c'est
+l'exhaustivité de l'observation (§ 3.2).
 
 ---
 
@@ -172,7 +233,7 @@ Cette section explique les quatre briques algorithmiques du projet. Elle est
 écrite pour être comprise sans connaissance préalable en vision par ordinateur,
 tout en employant les termes techniques exacts.
 
-### 3.0 Sources finies et sources infinies (`source.py`)
+### 3.1 Sources finies et sources infinies (`source.py`)
 
 Le pipeline accepte trois origines d'images — fichier, webcam locale, flux réseau
 RTSP/HTTP — derrière une abstraction unique, `VideoSource`. `Detector` et
@@ -227,7 +288,7 @@ le mot de passe.
 > silencieuse, puisque l'analyse d'un fichier continuerait de marcher et que
 > seul le direct deviendrait faux.
 
-### 3.0 bis Analyse au rythme réel (mode par défaut)
+### 3.2 Analyse au rythme réel (mode par défaut)
 
 Sur un processeur, une inférence YOLO coûte 100 à 150 ms. Analyser **chaque**
 image d'une vidéo à 25 images/s demande donc trois à quatre fois sa durée : dix
@@ -236,7 +297,7 @@ une image saccadée avancer au ralenti. Ce n'est exploitable ni pour surveiller,
 ni pour démontrer.
 
 Le mode temps réel applique au **fichier** la stratégie déjà employée sur un
-direct (§ 3.0) : écarter les images qu'on n'a pas eu le temps de traiter, en
+direct (§ 3.1) : écarter les images qu'on n'a pas eu le temps de traiter, en
 avançant dans le fichier jusqu'au point où l'horloge en est arrivée.
 
 **Ce que ça coûte, et ce que ça ne coûte pas.**
@@ -286,7 +347,7 @@ pilote se remplir quinze secondes est exactement la panne que le module existe
 pour empêcher. Le démarrage à froid y coûte quelques images de plus — le bon prix
 pour une source qui ne se rejoue pas.
 
-### 3.1 YOLO — détection d'objets en une passe (*one-stage*)
+### 3.3 YOLO — détection d'objets en une passe (*one-stage*)
 
 **Le problème.** Sur une image, trouver *où* sont les objets et *ce qu'ils sont*.
 
@@ -329,7 +390,7 @@ est interchangeable en une ligne de `config.py`.
 - `iou` (0.50) : seuil de la NMS. Le baisser supprime plus agressivement les
   doublons, au risque de fusionner deux objets réellement proches.
 
-### 3.2 ByteTrack — suivi multi-objets et association
+### 3.4 ByteTrack — suivi multi-objets et association
 
 **Le problème.** YOLO analyse chaque frame indépendamment. Sur la frame 100 il
 voit « une personne », sur la frame 101 il voit « une personne ». Rien ne dit que
@@ -387,7 +448,7 @@ la **mémoire temporelle** — première et dernière apparition, historique des
 positions, chronomètre par zone — qui est notre logique métier et dont dépend
 `events.py`.
 
-### 3.3 Appartenance à un polygone
+### 3.5 Appartenance à un polygone
 
 **Le problème.** Une zone de surveillance n'est presque jamais un rectangle : un
 quai de chargement vu en perspective est un quadrilatère quelconque. Il faut
@@ -427,7 +488,7 @@ rendre en échange, et rendait ce paragraphe faux en pratique.
    fonctionne donc en 720p, en 1080p et sur webcam ; `ZoneManager.initialize()`
    les convertit en pixels quand la première frame arrive.
 
-### 3.3 bis Frontière à marge signée
+### 3.6 Frontière à marge signée
 
 Une boîte de détection tremble de quelques pixels d'une frame à l'autre. Quand
 son point d'appui longe la frontière d'une zone, l'appartenance oscille — et
@@ -440,13 +501,13 @@ créer une bande d'incertitude autour de la frontière — entrer exige d'être 
 l'intérieur d'au moins `margin_ratio × hauteur apparente`, sortir exige d'en être
 sorti d'autant, et entre les deux l'appartenance ne change pas.
 
-La marge est **relative à la taille apparente**, pour la même raison qu'au § 3.5 :
+La marge est **relative à la taille apparente**, pour la même raison qu'au § 3.11 :
 vingt pixels valent un pas de côté au premier plan et trois mètres au fond du
 champ. `Detection` porte déjà `.height`, donc `zones.py` calcule la marge sans
 rien demander au tracker — le flux reste unidirectionnel.
 
 **Deux hystérésis, deux défauts différents.** La bande *spatiale* absorbe
-l'imprécision de la boîte ; les compteurs de frames *temporels* (§ 3.4) absorbent
+l'imprécision de la boîte ; les compteurs de frames *temporels* (§ 3.7) absorbent
 les détections erratiques. La première ne remplace pas la seconde : un objet peut
 franchir nettement la bande sur une frame isolée par une erreur de détection, et
 seul le compteur l'écarte.
@@ -458,7 +519,7 @@ champ : une personne dont les pieds touchent le bas du cadre resterait
 éternellement « en cours d'entrée ». C'est exactement le cas de la zone plein
 cadre livrée par défaut, d'où l'exemption.
 
-### 3.4 La mémoire temporelle (`tracker.py`)
+### 3.7 La mémoire temporelle (`tracker.py`)
 
 ByteTrack fournit des identifiants ; il ne fournit aucune **histoire**. C'est le
 rôle de `TrackedObject` : pour chaque identifiant, accumuler ce qu'une frame
@@ -514,7 +575,7 @@ S'y ajoutent deux garde-fous contre les fausses alertes, exploités par
 n'atteint jamais les règles) et `last_event_time` par type d'événement, qui
 implémente le délai de garde décrit ci-dessous.
 
-### 3.4 bis Occupation des zones et surdensité (`occupancy.py`)
+### 3.8 Occupation des zones et surdensité (`occupancy.py`)
 
 « Sept personnes dans le hall depuis douze secondes » n'est la propriété d'aucun
 objet : c'est une propriété de la **scène**. Aucun prédicat mono-objet ne pouvait
@@ -531,7 +592,7 @@ cette mémoire testable sans polygone, sans image et sans OpenCV.
 `track_id`. Compter des boîtes donnerait un nombre qui bat au rythme du
 détecteur : une personne perdue puis retrouvée compterait deux fois, un objet
 momentanément occulté ferait chuter le total. C'est la même raison qui rend le
-tracker indispensable au chronométrage (§ 3.4).
+tracker indispensable au chronométrage (§ 3.7).
 
 **Le chronomètre de seuil.** Pour chaque couple *(zone, classe, seuil)*, on
 mémorise l'**instant** du franchissement plutôt qu'un compteur de frames. La
@@ -550,7 +611,7 @@ personnes en zone X pendant T secondes », seuil surchargeable par
 `SurveillanceZone.min_occupancy`) et les transitions de la chronologie
 (« hall : 2 → 7 personnes »).
 
-### 3.4 ter Franchissement de ligne (`crossing.py`)
+### 3.9 Franchissement de ligne (`crossing.py`)
 
 Une zone répond à « **où** est cet objet ? », une ligne à « **qu'a-t-il fait** ? ».
 La première décrit un état, la seconde un événement. C'est pourquoi `CrossingLine`
@@ -575,7 +636,7 @@ seulement faux.
 
 **Aucune librairie.** `supervision.LineZone` rendrait le même service au prix
 d'une dépendance de ~30 Mo, refusée ailleurs dans ce projet pour la même raison
-(§ 3.3). On ne paie pas 30 Mo pour quatre soustractions et deux multiplications.
+(§ 3.5). On ne paie pas 30 Mo pour quatre soustractions et deux multiplications.
 
 **Convention de sens.** Pour une ligne tracée de gauche à droite, le sens positif
 va vers le **bas** de l'image — l'origine des coordonnées image est en haut à
@@ -588,7 +649,7 @@ escalier. Un rapport qui parle la langue du site se relit sans traduction.
 connaître la scène ; en déclarer une « au cas où » ferait apparaître des chiffres
 que personne n'a demandés dans tous les rapports.
 
-### 3.4 quater Ré-association des pistes perdues (`reidentification.py`)
+### 3.10 Ré-association des pistes perdues (`reidentification.py`)
 
 **Optionnelle et désactivée par défaut.** Au-delà de `TRACKING.max_age_s`, une
 piste est purgée et l'objet qui réapparaît reçoit un nouvel identifiant : son
@@ -622,7 +683,7 @@ deux personnes.
 **Aucune dépendance** : `cv2.calcHist` et `cv2.compareHist` font partie
 d'OpenCV, déjà obligatoire.
 
-### 3.5 Seuils relatifs — corriger la perspective sans calibration
+### 3.11 Seuils relatifs — corriger la perspective sans calibration
 
 Un seuil exprimé en pixels n'a pas le même sens partout dans l'image. Un
 déplacement de 25 px, c'est un frémissement pour un sac au premier plan et une
@@ -645,7 +706,7 @@ mais elle supprime l'essentiel de l'erreur, **sans calibration ni homographie**,
 donc sans rien demander à l'utilisateur. Les seuils en pixels restent déclarés
 dans `config.EVENT_RULES` et servent de repli si le ratio n'est pas renseigné.
 
-### 3.5 bis Objet abandonné : une relation, pas un voisinage
+### 3.12 Objet abandonné : une relation, pas un voisinage
 
 La règle demandait « aucune personne dans le rayon **maintenant** ». Le critère
 est fragile dans les deux sens :
@@ -667,7 +728,7 @@ cette fenêtre, l'association est figée — une personne qui passe devant un sa
 déjà posé n'en devient pas le porteur.
 
 **On vote, on ne retient pas la première réponse.** Même mécanisme que pour la
-classe (§ 3.4) : à l'apparition d'un sac, la personne la plus proche sur une
+classe (§ 3.7) : à l'apparition d'un sac, la personne la plus proche sur une
 frame isolée peut être un passant. Les égalités sont départagées par le plus
 petit identifiant, pour que deux analyses de la même vidéo désignent le même
 porteur.
@@ -678,7 +739,7 @@ reste alors le seul disponible, et il vaut mieux qu'aucun critère du tout. Le
 rapport distingue les deux cas : « #9 (parti) » et « aucun observé » ne disent
 pas la même chose.
 
-### 3.6 Le moteur d'événements temporel
+### 3.13 Le moteur d'événements temporel
 
 Ce n'est pas un algorithme publié, mais c'est la partie proprement « métier » du
 projet — celle qui transforme de la géométrie en information de sécurité. Le
@@ -722,7 +783,7 @@ de détection : une boîte qui « tremble » de 2 pixels par frame accumulerait 
 centaines de pixels alors que l'objet ne bouge pas. L'absence de propriétaire est
 testée en cherchant la personne suivie la plus proche dans un rayon donné.
 
-### 3.7 Le score de priorité — ordonner sans juger
+### 3.14 Le score de priorité — ordonner sans juger
 
 Quand trente incidents tombent pendant la nuit, l'opérateur a besoin de savoir
 **par lequel commencer**. C'est le seul rôle du score : il n'ajoute aucune
@@ -774,7 +835,7 @@ d'où viennent les points.
 jamais dans `report.py`, qui reste purement présentation : il trie et affiche des
 scores déjà calculés. Le flux de données reste unidirectionnel.
 
-### 3.8 Le rapport à deux niveaux
+### 3.15 Le rapport à deux niveaux
 
 Le rapport d'incident isolé répond à « que s'est-il passé à 21 h 47 ? ». Le
 rapport de **session** répond à la question d'un chef de poste en fin de
@@ -819,7 +880,7 @@ deux endroits — et divergerait tôt ou tard.
 **Échantillonnage en temps vidéo.** Le découpage suit `video_time`, jamais
 l'horloge de traitement : la même vidéo analysée sur un portable lent ou sur un
 GPU produit exactement la même chronologie. En direct, `video_time` **est**
-l'horloge murale (§ 3.0), donc les tranches correspondent à des minutes réelles
+l'horloge murale (§ 3.1), donc les tranches correspondent à des minutes réelles
 — le comportement attendu d'une surveillance continue.
 
 **Mode fini et mode continu.** Rien dans la génération ne suppose que la session
@@ -829,7 +890,7 @@ tard, chacun reflétant l'état à son instant d'édition.
 
 ---
 
-### 3.9 Garde-fous : configuration, conservation, minimisation
+### 3.16 Garde-fous : configuration, conservation, minimisation
 
 **Une configuration fautive ne démarre pas.** Une faute de frappe dans
 `config.py` ne produit pas une erreur, elle produit une **règle silencieusement
@@ -921,8 +982,9 @@ Dans l'ordre, depuis la racine du projet, environnement virtuel activé :
 ```bash
 pip install -r requirements.txt   # 1. dépendances (une fois)
 python download_models.py         # 2. poids YOLO dans models/ (une fois)
+#   … --only nano                 #    variante : n'embarquer que le plus léger
 pytest -q                         # 3. vérification : 650 tests, < 6 s
-streamlit run app.py              # 4. interface (complète à partir de l'étape 7)
+streamlit run app.py              # 4. interface
 ```
 
 **Vérifier l'installation sans interface**, utile pour diagnostiquer :
@@ -1085,10 +1147,12 @@ paragraphe de plus ici, et une source d'erreur de plus dans la configuration.
 | 10 | `source.py` — fichier / webcam / RTSP unifiés | ✅ fait |
 | 11 | Score de priorité — barème transparent et traçable | ✅ fait |
 | 12 | `timeline.py` + `session_report.py` — rapport à deux niveaux | ✅ fait |
+| 13 | Analyse au rythme réel + écran d'initialisation | ✅ fait |
+| 14 | Déploiement : image conteneur + vitrine statique | ✅ fait |
 
 ### 6.1 Assainissement — aligner le code sur ce que le README annonçait
 
-Les trois modules ci-dessus ont longtemps été **écrits, testés et jamais
+Trois des modules ci-dessus ont longtemps été **écrits, testés et jamais
 appelés** : 1 321 lignes que l'exécutable n'importait pas. Un module qu'aucun
 chemin d'exécution ne touche n'existe pas pour l'utilisateur, et un README qui
 le décrit annonce un produit qui n'est pas livré. Cette campagne l'a corrigé.
@@ -1102,9 +1166,29 @@ le décrit annonce un produit qui n'est pas livré. Cette campagne l'a corrigé.
 | E | Score affiché dans le rapport d'incident | Le même incident portait « critique » à l'écran et aucune priorité sur le papier. |
 | F | Surface publique et documentation | `__all__` décrivait le projet tel qu'il était à l'étape 3. |
 
+### 6.2 Extensions — ce que l'assainissement a rendu possible
+
+Une fois le code aligné sur son architecture annoncée, sept extensions se sont
+posées dessus sans la contredire. L'ordre n'est pas anodin : la première
+débloque toutes les autres.
+
+| Phase | Extension | Ce qu'elle a débloqué |
+|---|---|---|
+| 1 | Moteur ouvert aux règles multi-objets | La boucle `for objet: for règle:` interdisait **structurellement** toute règle qui raisonne sur une relation. Sans elle, ni surdensité, ni franchissement, ni porteur d'objet. |
+| 2 | `SurveillanceZone` remplace `ZoneConfig` | Un site réel se décrit enfin : un hall et une réserve n'appellent pas les mêmes règles (§ 5). |
+| 3 | Frontière à marge signée | Une boîte qui tremble sur une frontière ne remet plus le chronomètre à zéro (§ 3.6). |
+| 4 | Occupation et surdensité | « Sept personnes dans le hall depuis douze secondes » (§ 3.8). |
+| 5 | Franchissement de ligne | Comptage de flux, sans dépendance (§ 3.9). |
+| 6 | Objet abandonné relationnel | « Son porteur est parti », et non « personne n'est à côté » (§ 3.12). |
+| 8 | Garde-fous, rétention, capture extraite | Une configuration fautive ne démarre plus ; les preuves ont une durée de vie (§ 3.16). |
+| 7 | Ré-association des pistes perdues | Livrée **désactivée** : entre manquer un incident et en fabriquer un, on choisit le premier (§ 3.10). |
+
+Le détail phase par phase — ce qui a changé, ce que ça débloque, ce qu'il faut
+vérifier à l'œil — est dans **[MIGRATION_NOTES.md](MIGRATION_NOTES.md)**.
+
 **Le cœur du projet est fonctionnel** : 650 tests, et la chaîne source → suivi →
-zones → incidents → chronologie → rapports PDF/CSV tourne de bout en bout, sur
-fichier comme sur webcam.
+zones → occupation → incidents → chronologie → rapports PDF/CSV tourne de bout
+en bout, sur fichier comme sur webcam ou flux RTSP, au rythme réel de la vidéo.
 
 ---
 
@@ -1143,7 +1227,7 @@ ignore les angles morts est dangereux.
   une seule piste, et le rapport affirme qu'une personne est restée quarante
   minutes là où deux se sont succédé — un document présenté comme opposable
   énonce alors un fait faux. Entre manquer un incident et en fabriquer un, un
-  système de sécurité choisit le premier. Voir § 3.4 quater.
+  système de sécurité choisit le premier. Voir § 3.10.
 - Aucune ré-identification entre caméras ou entre sessions.
 
 **Limites du raisonnement**
@@ -1151,7 +1235,7 @@ ignore les angles morts est dangereux.
   zone mais dont le point d'appui se projette dedans produira un faux positif.
   Une homographie vers un plan de sol corrigerait cela. Les **seuils de distance**
   (immobilité, proximité du propriétaire) sont en revanche déjà corrigés de la
-  perspective, en les rapportant à la taille apparente de l'objet — voir § 3.5.
+  perspective, en les rapportant à la taille apparente de l'objet — voir § 3.11.
 - Les règles sont des seuils fixes, sans apprentissage du comportement normal
   du site.
 - Le système ne distingue pas une personne autorisée d'une personne non
@@ -1175,27 +1259,28 @@ ignore les angles morts est dangereux.
 ## 8. Feuille de route et extensions
 
 Le périmètre est découpé en trois niveaux. Ce découpage est un choix assumé : un
-projet solo se juge sur sa finition, et quatre règles mesurées et documentées
-valent mieux que huit règles approximatives.
+projet solo se juge sur sa finition, et cinq règles mesurées et documentées
+valent mieux que douze règles approximatives.
 
-### 8.1 Cœur — le produit livrable
+### 8.1 Cœur — livré
 
-Détection multi-classes, suivi ByteTrack, mémoire temporelle, zones polygonales,
-les quatre règles d'incident (intrusion, présence prolongée, objet abandonné,
-hors horaires), anti-rebond, journal horodaté avec image de preuve, rapports
-PDF/CSV, interface Streamlit avec tableau de bord et réglages ajustables,
-comptage d'objets distincts par zone. Suivi détaillé au § 6.
+Source unifiée (fichier, webcam, RTSP) avec cadence temps réel et reconnexion,
+détection multi-classes, suivi ByteTrack, mémoire temporelle, zones typées à
+seuils surchargeables, frontières à marge signée, occupation par zone,
+franchissement de ligne, les **cinq** règles d'incident (intrusion, présence
+prolongée, objet abandonné, hors horaires, surdensité), anti-rebond, score de
+priorité traçable, captures horodatées avec rétention, rapports d'incident et de
+session en PDF/CSV, interface Streamlit, image conteneur. Suivi détaillé au § 6.
 
 ### 8.2 Avancé — ambitieux mais atteignable
 
 | Extension | Apport | Librairies |
 |---|---|---|
-| Enrichissement LLM du rapport | Rédaction en langage naturel **par-dessus** des faits déjà établis, avec repli automatique sur le gabarit | `anthropic` |
-| Franchissement de ligne virtuelle | Comptage entrée/sortie : raisonner en flux et plus seulement en présence | aucune — signe du produit vectoriel |
-| Jeu de validation + métriques | Chiffrer le taux de détection et les fausses alertes par heure de vidéo | `csv`, `pandas` |
-| Éditeur de zones dans l'interface | Redéfinir les polygones sans éditer `config.py` | `streamlit-drawable-canvas` |
+| **Jeu de validation + métriques** | Le manque le plus criant : chiffrer le taux de détection et les fausses alertes par heure de vidéo. Tout le reste du projet est vérifié par des tests ; la **qualité de détection**, elle, n'est aujourd'hui étayée par aucune mesure. | `csv`, `pandas` |
+| Éditeur de zones dans l'interface | Redéfinir les polygones sans éditer `config.py` — le seul geste qui oblige encore à ouvrir un fichier Python | `streamlit-drawable-canvas` |
+| Enrichissement LLM du rapport | Rédaction en langage naturel **par-dessus** des faits déjà établis, avec repli automatique sur le gabarit. L'ossature existe (`generate_with_llm`) | `anthropic` |
 | Persistance SQLite | Historique des incidents entre deux sessions | `sqlite3` |
-| Conteneurisation | Reproductibilité de l'environnement | Docker |
+| Purge planifiée des preuves | La rétention s'applique au démarrage ; sur un serveur qui redémarre rarement, elle s'applique rarement | `apscheduler` ou une tâche cron |
 
 ### 8.3 Extensions futures — hors périmètre, et pourquoi
 
@@ -1213,6 +1298,13 @@ réglementation sur la vidéosurveillance et la protection des données
 (information des personnes, durée de conservation, base légale). Le projet ne
 fait aucune reconnaissance faciale ni identification de personnes, et n'est pas
 prévu pour cela.
+
+Trois dispositions vont dans ce sens sans prétendre y suffire : la **durée de
+conservation** des captures (30 jours par défaut, purgée au démarrage), le
+**floutage optionnel** des personnes autres que l'objet déclencheur, et la
+mention **BROUILLON** portée par chaque document produit. Elles sont détaillées
+au § 3.16 — et le floutage y est présenté pour ce qu'il est : une mesure de
+minimisation, pas une anonymisation au sens réglementaire.
 
 ---
 
